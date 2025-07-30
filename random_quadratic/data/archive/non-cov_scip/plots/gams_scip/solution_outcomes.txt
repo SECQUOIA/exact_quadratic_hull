@@ -1,0 +1,12 @@
+Solution Outcomes Summary
+=======================
+
+Time limit: 1800 seconds
+Objective tolerance: 0.0001
+
+Strategy             Optimal    Timeout    Wrong      Total     
+------------------------------------------------------------
+BigM                 95         5          0          100       
+Hull(ε-approx.)      16         79         0          95        
+Hull Exact           42         42         0          84        
+Binary Mult.         41         43         0          84        
