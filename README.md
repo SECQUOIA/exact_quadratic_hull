@@ -236,6 +236,26 @@ cd random_quadratic/random_quadratic
 python batch_run.py --batch none  # Test random instances
 ```
 
+### Step 9: Replicate Results for Random Quadratics
+
+To replicate the computational results for random quadratic instances presented in the paper, run the following commands:
+
+```bash
+# Make sure conda environment is activated
+conda activate exact_hull
+
+# Navigate to the random quadratic directory
+cd random_quadratic/random_quadratic
+
+# Run batch experiments for positive semidefinite (convex) instances
+python batch_run.py --batch psd
+
+# Run batch experiments for non-convex instances  
+python batch_run.py --batch nonconvex100
+```
+
+These commands will generate comprehensive computational results for both convex (psd) and non-convex (non) random quadratic GDP instances, which can be used to reproduce the performance comparisons and analysis presented in the research paper.
+
 **Congratulations!** If the test ran successfully, you have successfully set up the exact hull reformulation environment. You can find the logs of the test run in the `data/` folder, and a summary of test run results will be saved in `projects/env_test/exact_quadratic_hull/random_quadratic/data/results.xlsx`.
 
 ### Troubleshooting
