@@ -137,7 +137,7 @@ ls "$PYOMO_PATH/gdp/plugins/hull_reduced_y.py"
 
 ### Step 6: Modify the GAMS Writer (Required for GAMS)
 
-**Issue**: Pyomo 6.9.2 doesn't include the 'NLP' flag for Gurobi solver capabilities, which is required for MINLP problems. This was fixed in later Pyomo versions.
+**Issue**: Pyomo 6.9.2 doesn't include the 'NLP' and 'MINLP' flag for Gurobi solver capabilities, which is required for MINLP problems. This was fixed in later Pyomo versions.
 
 **Solution**: You can either manually edit the GAMS writer file or use the pre-modified version from this repository.
 
