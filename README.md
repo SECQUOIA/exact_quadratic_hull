@@ -233,9 +233,10 @@ conda activate exact_hull
 
 # Test with random quadratic instances
 cd random_quadratic/random_quadratic
-python 
-python batch_run.py  # Test random instances
+python batch_run.py --batch none  # Test random instances
 ```
+
+**Congratulations!** If the test ran successfully, you have successfully set up the exact hull reformulation environment. You can find the logs of the test run in the `data/` folder, and a summary of test run results will be saved in `projects/env_test/exact_quadratic_hull/random_quadratic/data/results.xlsx`.
 
 ### Troubleshooting
 
