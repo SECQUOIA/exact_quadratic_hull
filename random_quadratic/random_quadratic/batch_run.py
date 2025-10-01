@@ -1,3 +1,4 @@
+import argparse
 import os
 from datetime import datetime
 from itertools import product
@@ -306,6 +307,20 @@ def run_batch_single_solver(
 
 
 if __name__ == "__main__":
+    # Parse command line arguments
+    parser = argparse.ArgumentParser(description="Run batch optimization problems")
+    parser.add_argument(
+        "--batch", 
+        type=str, 
+        default="nonconvex100",
+        help="Batch name (e.g., 'psd' for psd.txt, 'nonconvex100' for nonconvex100.txt, 'none' to generate new batch). Default: nonconvex100"
+    )
+    
+    args = parser.parse_args()
+    
+    # Convert "none" string to None
+    batch_name = None if args.batch.lower() == "none" else args.batch
+
     # Example usage:
 
     mode = "no_mode"
@@ -321,18 +336,20 @@ if __name__ == "__main__":
         # {"solver": "scip", "subsolver": None},
     ]
 
-    # Use an existing batch file or create a new one
-    batch_path = os.path.join(
-        os.path.dirname(os.getcwd()),
-        "data",
-        "batches",
-        "nonconvex100.txt",
-    )
-    # batch_path = None
+    # Determine batch path based on argument
+    if batch_name is not None:
+        batch_path = os.path.join(
+            os.path.dirname(os.getcwd()),
+            "data",
+            "batches",
+            f"{batch_name}.txt",
+        )
+    else:
+        batch_path = None
 
     only_generate = False
 
-    # Generate a batch of models
+    # Generate a batch of models if needed
     if batch_path is None or not os.path.exists(batch_path):
         batch_path = generate_batch(
             n_dimensions_range=[2],
