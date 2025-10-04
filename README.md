@@ -84,7 +84,7 @@ conda install -c conda-forge openpyxl
 
 ### Step 3: Install GAMS
 
-**Download and install GAMS 49.1.0:**
+**Download and install GAMS 49.1.0 (Skip if already installed):**
 
 1. Visit [GAMS Download Page](https://www.gams.com/download/)
 2. Download GAMS 49.1.0 for your operating system
@@ -102,7 +102,7 @@ export PATH="$GAMS_PATH:$PATH"
 gams 
 ```
 
-### Step 4: Solver Licenses
+### Step 4: Solver Licenses (Skip if already installed)
 
 **GAMS License (Required):**
 - GAMS requires a license to run
@@ -236,7 +236,7 @@ cd random_quadratic/random_quadratic
 python batch_run.py --batch none  # Test random instances
 ```
 
-**Congratulations!** If the test ran successfully, you have successfully set up the exact hull reformulation environment. You can find the logs of the test run in the `data/` folder, and a summary of test run results will be saved in `projects/env_test/exact_quadratic_hull/random_quadratic/data/results.xlsx`.
+**Congratulations!** If the test ran successfully, you have successfully set up the exact hull reformulation environment. You can find the logs of the test run in the `data/` folder, and a summary of test run results will be saved in `random_quadratic/data/results.xlsx`.
 
 ### Step 9: Replicate Results for Random Quadratics
 
@@ -256,7 +256,41 @@ python batch_run.py --batch psd
 python batch_run.py --batch nonconvex100
 ```
 
-These commands will generate comprehensive computational results for both convex (psd) and non-convex (non) random quadratic GDP instances, which can be used to reproduce the performance comparisons and analysis presented in the research paper.
+These commands will generate comprehensive computational results for both convex (psd) and non-convex (non) random quadratic GDP instances, which can be used to reproduce the performance comparisons and analysis presented in the research paper. Summary of test run results will be saved in `random_quadratic/data/results.xlsx`.
+
+
+### Step 10: Running Particular Models (Custom Batches)
+
+To run only specific models instead of entire batches, the easiest way is to copy an existing batch file and keep only the model names you want to test.
+
+**Example: Running only the first model from the psd batch**
+
+```bash
+# Make sure conda environment is activated and you're in the random_quadratic directory
+conda activate exact_hull
+cd random_quadratic/random_quadratic
+
+# Navigate to the batches directory
+cd data/batches
+
+# Copy the psd batch file to create a custom batch
+cp psd.txt psd2.txt
+
+# Keep only the first line (first model) using head command
+head -n 1 psd.txt > psd2.txt
+
+# Verify the content
+cat psd2.txt
+
+# Go back to the random_quadratic directory
+cd ../..
+
+# Run the custom batch
+python batch_run.py --batch psd2
+```
+
+You can modify this approach to create custom batches with any subset of models by manually editing the batch file or using command-line tools to select specific lines.
+
 
 
 
