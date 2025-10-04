@@ -268,7 +268,7 @@ To run only specific models instead of entire batches, the easiest way is to cop
 ```bash
 # Make sure conda environment is activated and you're in the random_quadratic directory
 conda activate exact_hull
-cd random_quadratic/random_quadratic
+cd random_quadratic
 
 # Navigate to the batches directory
 cd data/batches
@@ -282,14 +282,39 @@ head -n 1 psd.txt > psd2.txt
 # Verify the content
 cat psd2.txt
 
-# Go back to the random_quadratic directory
-cd ../..
+# Go back to the random_quadratic/random_quadratic directory
+cd ../../random_quadratic
+
 
 # Run the custom batch
 python batch_run.py --batch psd2
 ```
 
 You can modify this approach to create custom batches with any subset of models by manually editing the batch file or using command-line tools to select specific lines.
+
+**Running with specific solvers only:**
+
+If you want to run experiments with only particular solvers, you can comment out the unwanted solver configurations in `batch_run.py`. Open the file and locate the `solver_configs` list (around line 329):
+
+```python
+solver_configs: List[Dict[str, Any]] = [
+    {"solver": "gams", "subsolver": "gurobi"},
+    {"solver": "gams", "subsolver": "baron"},
+    {"solver": "gams", "subsolver": "scip"},
+]
+```
+
+Comment out the solvers you don't want to use:
+
+```python
+solver_configs: List[Dict[str, Any]] = [
+    {"solver": "gams", "subsolver": "gurobi"},  # Keep Gurobi
+    # {"solver": "gams", "subsolver": "baron"},  # Comment out Baron
+    # {"solver": "gams", "subsolver": "scip"},   # Comment out SCIP
+]
+```
+
+This way, the batch run will only use the uncommented solvers.
 
 
 
