@@ -333,8 +333,8 @@ if batch_path is None or not os.path.exists(batch_path):
         n_feasible_regions_range=[3],                         # Feasible regions: 3
         mode=mode,
         constraint_margin=(0.0, 0.1),
-        solver="gams",         # For initial model generation only
-        subsolver="gurobi",    # For initial model generation only
+        solver="gams",         # For initial model generation only (not used in solving)
+        subsolver="gurobi",    # For initial model generation only (not used in solving; does NOT mean models will be solved with Gurobi)
         ensure_positive_definite=False,  # Set to True for convex instances
     )
 ```
