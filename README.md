@@ -345,7 +345,7 @@ if batch_path is None or not os.path.exists(batch_path):
 - `n_disjuncts_per_disjunction_range`: Number of disjuncts per disjunction
 - `n_constraints_per_disjunct_range`: Number of constraints within each disjunct
 - `n_feasible_regions_range`: Number of feasible regions to ensure
-- `constraint_margin`: Constraint violation tolerance range
+- `constraint_margin`: Controls the "size" of the explicitly feasible regions
 - `ensure_positive_definite`: Set to `True` to generate convex (PSD) instances, `False` for non-convex
 
 After modifying these parameters, run:
