@@ -352,7 +352,7 @@ if __name__ == "__main__":
     # Generate a batch of models if needed
     if batch_path is None or not os.path.exists(batch_path):
         batch_path = generate_batch(
-            n_dimensions_range=[2],
+            n_dimensions_range=[i for i in range(3,6)],
             n_disjunctions_range=[2],
             n_disjuncts_per_disjunction_range=[2],
             n_constraints_per_disjunct_range=[2],
@@ -361,6 +361,7 @@ if __name__ == "__main__":
             constraint_margin=(0.0, 0.1),
             solver="gams",  # For initial model generation only
             subsolver="gurobi",  # For initial model generation only
+            ensure_positive_definite=False,
         )
 
     if not only_generate:

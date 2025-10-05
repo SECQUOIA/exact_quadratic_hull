@@ -316,7 +316,65 @@ solver_configs: List[Dict[str, Any]] = [
 
 This way, the batch run will only use the uncommented solvers.
 
+**Generating new batches with custom model parameters:**
 
+If you want to generate a completely new batch of models with different parameters (e.g., different dimensions, number of disjunctions, etc.), you need to modify the `generate_batch` parameters in `batch_run.py`.
+
+Open `batch_run.py` and locate the model generation section (around lines 352-365). Modify the parameters to customize your batch:
+
+```python
+# Generate a batch of models if needed
+if batch_path is None or not os.path.exists(batch_path):
+    batch_path = generate_batch(
+        n_dimensions_range=[i for i in range(3,6)],           # Dimensions: 3, 4, 5
+        n_disjunctions_range=[i for i in range(3,6)],         # Disjunctions: 3, 4, 5
+        n_disjuncts_per_disjunction_range=[i for i in range(3,6)],  # Disjuncts: 3, 4, 5
+        n_constraints_per_disjunct_range=[i for i in range(3,6)],   # Constraints: 3, 4, 5
+        n_feasible_regions_range=[3],                         # Feasible regions: 3
+        mode=mode,
+        constraint_margin=(0.0, 0.1),
+        solver="gams",         # For initial model generation only
+        subsolver="gurobi",    # For initial model generation only
+        ensure_positive_definite=False,  # Set to True for convex instances
+    )
+```
+
+**Parameter descriptions:**
+- `n_dimensions_range`: Number of decision variables in the model
+- `n_disjunctions_range`: Number of disjunctions in the GDP
+- `n_disjuncts_per_disjunction_range`: Number of disjuncts per disjunction
+- `n_constraints_per_disjunct_range`: Number of constraints within each disjunct
+- `n_feasible_regions_range`: Number of feasible regions to ensure
+- `constraint_margin`: Constraint violation tolerance range
+- `ensure_positive_definite`: Set to `True` to generate convex (PSD) instances, `False` for non-convex
+
+After modifying these parameters, run:
+
+```bash
+python batch_run.py --batch none
+```
+
+This will generate a new batch file with the specified parameters and run all models in the batch. The batch file will be automatically created with a timestamp in the `data/batches/` directory.
+
+**Example use cases:**
+
+1. **Small test batch**: Use single values or small ranges
+   ```python
+   n_dimensions_range=[2]
+   n_disjunctions_range=[2]
+   n_disjuncts_per_disjunction_range=[2]
+   ```
+
+2. **Large-scale experiments**: Use wider ranges
+   ```python
+   n_dimensions_range=[i for i in range(5,11)]  # 5-10 dimensions
+   n_disjunctions_range=[i for i in range(3,8)]  # 3-7 disjunctions
+   ```
+
+3. **Convex instances only**: Set `ensure_positive_definite=True`
+   ```python
+   ensure_positive_definite=True
+   ```
 
 
 ### Troubleshooting
