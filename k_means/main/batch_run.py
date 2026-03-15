@@ -334,9 +334,9 @@ if __name__ == "__main__":
         run_batch(
             batch_path=batch_path,
             reformulation_strategies=[
-                #"gdp.bigm",
-                #"gdp.hull",
-                #"gdp.hull_exact",
+                "gdp.bigm",
+                "gdp.hull",
+                "gdp.hull_exact",
                 # "gdp.hull_reduced_y",
                 "gdp.binary_multiplication",
                 # "gdp.hull_eps_1e-2",
@@ -348,7 +348,7 @@ if __name__ == "__main__":
                 #"gdp.hull_exact_conic_no_sqrt_no_extra_var",
                 #"gdp.hull_exact_conic_sqrt_extra_var",
                 #"gdp.hull_exact_conic_sqrt_no_extra_var",
-                #"gdp.hull_exact_conic_no_cholesky",
+                "gdp.hull_exact_conic_no_cholesky",
                 #"gdp.hull_exact_extra_var",
                 #"gdp.hull_exact_extra_var_inequal",
             ],

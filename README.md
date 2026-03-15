@@ -213,10 +213,30 @@ Results will appear in:
 
 # Reproducing Experiments
 
+### Random Quadratic Instances
+
     cd random_quadratic/random_quadratic
 
     python batch_run.py --batch psd
     python batch_run.py --batch nonconvex100
+
+### CSTR Network Optimization
+
+    cd cstr
+
+    python batch_run.py
+
+### K-means Clustering
+
+    cd k_means/main
+
+    python batch_run.py --batch k_means_96
+
+### Constrained Layout Optimization (CLay)
+
+    cd clay
+
+    python clay.py
 
 ------------------------------------------------------------------------
 
