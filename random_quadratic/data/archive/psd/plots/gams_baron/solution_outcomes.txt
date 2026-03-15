@@ -1,0 +1,30 @@
+Solution Outcomes Summary
+=========================
+
+Time limit: 300 seconds
+Objective tolerance: 0.0001
+
+Categories:
+- Optimal: Correct optimal solutions within time limit
+- Timeout: Solutions that reached the time limit
+- Infeasible: Solver reported an instance as infeasible/unbounded
+- Wrong_Optimal: Solver reported optimal but objective value is incorrect
+- Solver_Error: Solver failed with error or other non-optimal status
+- Missing: Instances not present in data for this strategy
+
+Strategy                            Optimal    Timeout    Infeasible   Wrong_Opt   Solver_Err   Missing    Total     
+--------------------------------------------------------------------------------------------------------------
+BigM                                233        7          0            0           0            0          240       
+General Exact Hull                  29         183        0            28          0            0          240       
+Hull(ε=1e-2)                        8          228        0            4           0            0          240       
+Hull(ε=1e-3)                        3          118        112          7           0            0          240       
+Hull ε-approx. (ε=1e-4)             5          233        0            2           0            0          240       
+Conic Exact Hull (Only factorized)  29         209        0            2           0            0          240       
+General Exact Hull_extra_var        11         208        0            21          0            0          240       
+Conic Exact Hull                    20         190        0            30          0            0          240       
+General Exact Hull Extra Var Ineq.  15         195        0            30          0            0          240       
+
+==============================================================================================================
+Summary Statistics:
+--------------------------------------------------------------------------------------------------------------
+TOTAL                               353        1571       112          124         0            0          2160      

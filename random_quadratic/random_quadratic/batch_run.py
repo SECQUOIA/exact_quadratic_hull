@@ -5,7 +5,7 @@ from itertools import product
 from typing import Any, Dict, List, Optional, Tuple
 
 import build_model
-from solve import solve_model
+from solve import find_models_dir, solve_model
 
 
 def generate_batch(
@@ -135,7 +135,9 @@ def generate_batch(
 
             # Always add a counter to the filename
             counter = 1
-            models_dir = os.path.join(data_dir, "models")
+
+            # Find existing models directory (throws error if not found)
+            models_dir = find_models_dir()
 
             # Find a unique filename with counter
             while True:
@@ -310,16 +312,17 @@ if __name__ == "__main__":
     # Parse command line arguments
     parser = argparse.ArgumentParser(description="Run batch optimization problems")
     parser.add_argument(
-        "--batch", 
-        type=str, 
-        default="nonconvex100",
-        help="Batch name (e.g., 'psd' for psd.txt, 'nonconvex100' for nonconvex100.txt, 'none' to generate new batch). Default: nonconvex100"
+        "--batch",
+        type=str,
+        default="none",
+        help="Batch name (e.g., 'psd' for psd.txt, 'nonconvex100' \
+            for nonconvex100.txt, 'none' to generate new batch). Default: nonconvex100",
     )
-    
+
     args = parser.parse_args()
-    
+
     # Convert "none" string to None
-    batch_name = None if args.batch.lower() == "none" else args.batch
+    batch_name: Optional[str] = None if args.batch.lower() == "none" else args.batch
 
     # Example usage:
 
@@ -333,10 +336,12 @@ if __name__ == "__main__":
         # {"solver": "gurobi", "subsolver": 'persistent'},
         # {"solver": "gams", "subsolver": "ipopth"},
         {"solver": "gams", "subsolver": "scip"},
+        {"solver": "gams", "subsolver": "scip_convex"},
         # {"solver": "scip", "subsolver": None},
     ]
 
     # Determine batch path based on argument
+    batch_path: Optional[str]
     if batch_name is not None:
         batch_path = os.path.join(
             os.path.dirname(os.getcwd()),
@@ -352,7 +357,7 @@ if __name__ == "__main__":
     # Generate a batch of models if needed
     if batch_path is None or not os.path.exists(batch_path):
         batch_path = generate_batch(
-            n_dimensions_range=[i for i in range(3,6)],
+            n_dimensions_range=[2],
             n_disjunctions_range=[2],
             n_disjuncts_per_disjunction_range=[2],
             n_constraints_per_disjunct_range=[2],
@@ -361,7 +366,7 @@ if __name__ == "__main__":
             constraint_margin=(0.0, 0.1),
             solver="gams",  # For initial model generation only
             subsolver="gurobi",  # For initial model generation only
-            ensure_positive_definite=False,
+            ensure_positive_definite=True,
         )
 
     if not only_generate:
@@ -370,13 +375,25 @@ if __name__ == "__main__":
             batch_path=batch_path,
             reformulation_strategies=[
                 "gdp.bigm",
-                "gdp.hull",
-                "gdp.hull_exact",
+                # "gdp.hull",
+                # "gdp.hull_exact",
                 # "gdp.hull_reduced_y",
-                "gdp.binary_multiplication",
+                # "gdp.binary_multiplication",
+                # "gdp.hull_eps_1e-2",
+                # "gdp.hull_eps_1e-3",
+                # "gdp.hull_eps_1e-4",
+                # "gdp.hull_exact_conic",
+                "gdp.hull_exact_conic_original",
+                "gdp.hull_exact_conic_no_sqrt_extra_var",
+                "gdp.hull_exact_conic_no_sqrt_no_extra_var",
+                "gdp.hull_exact_conic_sqrt_extra_var",
+                "gdp.hull_exact_conic_sqrt_no_extra_var",
+                "gdp.hull_exact_conic_no_cholesky",
+                "gdp.hull_exact_extra_var",
+                "gdp.hull_exact_extra_var_inequal",
             ],
             mode=mode,
-            time_limit=1800,
+            time_limit=300,
             solver_configs=solver_configs,  # Run with all specified solver configurations
             calculate_relaxation_gap=False,  # Calculate relaxation gap for each model
             relaxation_only=False,  # Solve both original and relaxed problems

@@ -1,0 +1,27 @@
+Solution Outcomes Summary
+=========================
+
+Time limit: 300 seconds
+Objective tolerance: 0.0001
+
+Categories:
+- Optimal: Correct optimal solutions within time limit
+- Timeout: Solutions that reached the time limit
+- Infeasible: Solver reported an instance as infeasible/unbounded
+- Wrong_Optimal: Solver reported optimal but objective value is incorrect
+- Solver_Error: Solver failed with error or other non-optimal status
+- Missing: Instances not present in data for this strategy
+
+Strategy                            Optimal    Timeout    Infeasible   Wrong_Opt   Solver_Err   Missing    Total     
+--------------------------------------------------------------------------------------------------------------
+BigM                                91         9          0            0           0            0          100       
+Hull ε-approx. (ε=1e-4)             2          85         0            12          1            0          100       
+General Exact Hull                  59         41         0            0           0            0          100       
+Binary Mult.                        83         17         0            0           0            0          100       
+General Exact Hull_extra_var        51         49         0            0           0            0          100       
+General Exact Hull Extra Var Ineq.  62         38         0            0           0            0          100       
+
+==============================================================================================================
+Summary Statistics:
+--------------------------------------------------------------------------------------------------------------
+TOTAL                               348        239        0            12          1            0          600       
