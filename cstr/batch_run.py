@@ -7,7 +7,7 @@ from datetime import datetime
 import pyomo.environ as pyo
 from pyomo.opt.base.solvers import SolverFactory
 from pyomo.core.expr.visitor import identify_variables
-import gdp_reactor_gurobi
+import gdp_reactor
 import pandas as pd
 import shutil
 import pyomo.gdp.plugins.hull_exact
@@ -48,7 +48,7 @@ def _run_benchmark(num_reactors, mode, current_time, time_limit=3600, solvers=No
         solvers = ["gurobi", "baron", "scip"]
     summaries = []
     # Build the model.
-    m = gdp_reactor_gurobi.build_model(NT=num_reactors, mode=mode)
+    m = gdp_reactor.build_model(NT=num_reactors, mode=mode)
     strategies = ["no_reformulation"]
     if mode == "original":
         strategies = ["gdp.bigm","gdp.hull", "gdp.hull_exact", "gdp.binary_multiplication"]
