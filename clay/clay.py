@@ -21,14 +21,7 @@ import pyomo.gdp.plugins.hull_reduced_y
 import pyomo.gdp.plugins.hull_exact_extra_var
 import pyomo.gdp.plugins.hull_exact_extra_var_inequal
 
-# Add the path to import the constrained layout model
-sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'pyomo', 'examples', 'gdp', 'constrained_layout'))
-
-try:
-    from cons_layout_model import build_constrained_layout_model, constrained_layout_model_examples
-except ImportError:
-    print("Error: Could not import constrained layout model. Make sure cons_layout_model.py is available.")
-    sys.exit(1)
+from cons_layout_model import build_constrained_layout_model, constrained_layout_model_examples
 
 
 def solve_with_solver(
