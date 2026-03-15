@@ -18,8 +18,7 @@ the computational experiments reported in the paper.
     exact_quadratic_hull/
     ├── addons/
     │   ├── hull_exact.py            # Exact hull reformulation implementation
-    │   ├── hull_reduced_y.py        # Reduced hull reformulation implementation
-    │   └── gams_writer.py           # Modified GAMS writer for Pyomo 6.9.2
+    │   └── hull_exact_*.py          # Variant implementations (conic, extra var, etc.)
     ├── cstr/                        # CSTR network optimization benchmarks
     │   ├── gdp_reactor.py           # CSTR GDP model implementation
     │   ├── batch_run.py             # Batch execution script
@@ -67,6 +66,22 @@ constraints.
 
 ------------------------------------------------------------------------
 
+# Computational Results
+
+Pre-computed results from the experiments reported in the paper are
+included in the repository:
+
+-   **Random quadratic instances:** `random_quadratic/data/archive/`
+    (subdirectories: `psd`, `non-conv`, `psd_conic`)
+-   **CSTR network optimization:** `cstr/data/`
+    (subdirectories by solver: `baron`, `gurobi`, `scip`)
+-   **K-means clustering:** `k_means/data/archive/run_results/`
+    (results spreadsheet and performance profile plots by solver)
+-   **Constrained layout optimization:** `clay/data/`
+    (results in `clay_results.xlsx` and plots)
+
+------------------------------------------------------------------------
+
 # Computational Environment
 
 The computational experiments reported in the paper were conducted using
@@ -83,6 +98,15 @@ release):
 -   **Gurobi 13.0**
 -   **BARON 25.11.17**
 -   **SCIP 9.2.4**
+
+> **Note on Pyomo version:** The experiments in the paper used Pyomo
+> 6.9.2. However, that version contained a bug in the GAMS writer that
+> omitted the `NLP` and `MINLP` solver capability flags for Gurobi,
+> preventing it from being used for MINLP problems through the GAMS
+> interface. This bug was subsequently fixed and committed to Pyomo
+> upstream. The `requirements.txt` in this repository therefore
+> specifies **Pyomo 6.10.0**, which includes the fix. The newer version
+> does not affect result reproducibility.
 
 ------------------------------------------------------------------------
 

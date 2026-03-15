@@ -7,13 +7,22 @@ from datetime import datetime
 import pyomo.environ as pyo
 from pyomo.opt.base.solvers import SolverFactory
 from pyomo.core.expr.visitor import identify_variables
-import gdp_reactor
+import gdp_reactor_gurobi
 import pandas as pd
 import shutil
 import pyomo.gdp.plugins.hull_exact
+import pyomo.gdp.plugins.hull_exact_conic
+import pyomo.gdp.plugins.hull_exact_conic_no_sqrt_extra_var
+import pyomo.gdp.plugins.hull_exact_conic_no_sqrt_no_extra_var
+import pyomo.gdp.plugins.hull_exact_conic_original
+import pyomo.gdp.plugins.hull_exact_conic_sqrt_extra_var
+import pyomo.gdp.plugins.hull_exact_conic_sqrt_no_extra_var
+import pyomo.gdp.plugins.hull_exact_conic_no_cholesky
 import pyomo.gdp.plugins.hull_reduced_y
+import pyomo.gdp.plugins.hull_exact_extra_var
+import pyomo.gdp.plugins.hull_exact_extra_var_inequal
 
-def _run_benchmark(num_reactors, mode, current_time, time_limit=3600):
+def _run_benchmark(num_reactors, mode, current_time, time_limit=3600, solvers=None):
     """
     Run the benchmark for the CSTR superstructure and return a list of summary dictionaries.
 
@@ -27,22 +36,21 @@ def _run_benchmark(num_reactors, mode, current_time, time_limit=3600):
         Timestamp string used to name the results folder.
     time_limit : int, optional
         Time limit for the solver (default is 3600 seconds).
+    solvers : list of str, optional
+        List of solvers to run. Defaults to ["gurobi", "baron", "scip"].
 
     Returns
     -------
     summaries : list of dict
         A list of summary dictionaries for each solver run.
     """
+    if solvers is None:
+        solvers = ["gurobi", "baron", "scip"]
     summaries = []
     # Build the model.
-    m = gdp_reactor.build_model(NT=num_reactors, mode=mode)
+    m = gdp_reactor_gurobi.build_model(NT=num_reactors, mode=mode)
     strategies = ["no_reformulation"]
     if mode == "original":
-        # In original mode the model uses disjuncts, so use GDP-based transformations.
-        #strategies = ["gdp.hull", "gdp.bigm", "gdp.hull_exact", "gdp.hull_reduced_y"]
-        #strategies = ["gdp.hull"]
-        #strategies = ["gdp.binary_multiplication"]
-        # strategies = ["gdp.hull", "gdp.bigm", "gdp.hull_exact", "gdp.hull_reduced_y", "gdp.binary_multiplication"]
         strategies = ["gdp.bigm","gdp.hull", "gdp.hull_exact", "gdp.binary_multiplication"]
     
     # Clone the model to ensure a fresh solve.
@@ -66,8 +74,7 @@ def _run_benchmark(num_reactors, mode, current_time, time_limit=3600):
         if not os.path.exists(results_dir):
             os.makedirs(results_dir)
         for main_solver in ["gams"]:  # Add "gurobi" if desired.
-            #for solver in ["gurobi", "baron"]:  # Added baron as a subsolver option
-            for solver in ["SCIP"]:  # Added baron as a subsolver option
+            for solver in solvers:
                 try:
                     # Start timing the solver.
                     start = time.time()
@@ -88,29 +95,52 @@ def _run_benchmark(num_reactors, mode, current_time, time_limit=3600):
                                 opt.options["MIPGapAbs"] = 0
                                 res = opt.solve(m, tee=True)
                             elif main_solver == "gams":
+                                TOLS = {
+                                    "rel_gap": 1e-6,
+                                    "abs_gap": 1e-10,
+                                    "feas": 1e-6,
+                                    "opt": 1e-6,
+                                    "int": 1e-5,
+                                }
                                 if solver == "gurobi":
                                     options_gams = (
                                         '$onecho > gurobi.opt',
                                         'NonConvex 2',
+                                        'Threads 1',
+                                        f'MIPGap {TOLS["rel_gap"]}',
+                                        f'MIPGapAbs {TOLS["abs_gap"]}',
+                                        f'FeasibilityTol {TOLS["feas"]}',
+                                        f'OptimalityTol {TOLS["opt"]}',
+                                        f'IntFeasTol {TOLS["int"]}',
                                         '$offecho',
-                                        'GAMS_MODEL.optfile=1'
+                                        'GAMS_MODEL.optfile=1;'
                                     )
                                 elif solver == "baron":
                                     options_gams = (
                                         '$onecho > baron.opt',
+                                        'Threads 1',
+                                        f'EpsR {TOLS["rel_gap"]}',
+                                        f'EpsA {TOLS["abs_gap"]}',
+                                        f'AbsConFeasTol {TOLS["feas"]}',
+                                        'RelConFeasTol 0',
+                                        f'AbsIntFeasTol {TOLS["int"]}',
+                                        'RelIntFeasTol 0',
                                         '$offecho',
-                                        'GAMS_MODEL.optfile=1'
+                                        'GAMS_MODEL.optfile=1;'
                                     )
-                                elif solver == "SCIP":
+                                elif solver == "scip":
                                     options_gams = (
                                         '$onecho > scip.opt',
                                         f'limits/time = {time_limit}',
-                                        'numerics/feastol = 1e-6',
-                                        'numerics/epsilon = 1e-6',
-                                        'numerics/sumepsilon = 1e-6',
+                                        'parallel/maxnthreads = 1',
+                                        f'limits/gap = {TOLS["rel_gap"]}',
+                                        f'limits/absgap = {TOLS["abs_gap"]}',
+                                        f'numerics/feastol = {TOLS["feas"]}',
+                                        f'numerics/dualfeastol = {TOLS["opt"]}',
+                                        f'numerics/sumepsilon = {TOLS["feas"]}',
                                         'display/verblevel = 4',
                                         '$offecho',
-                                        'GAMS_MODEL.optfile=1'
+                                        'GAMS_MODEL.optfile=1;'
                                     )
                                 opt = pyo.SolverFactory("gams")
                                 res = opt.solve(
@@ -123,8 +153,8 @@ def _run_benchmark(num_reactors, mode, current_time, time_limit=3600):
                                     add_options=[
                                         f"option reslim={time_limit};",
                                         "option threads=1;",
-                                        "option optcr=1e-6;",
-                                        "option optca=0;",
+                                        f"option optcr={TOLS['rel_gap']};",
+                                        f"option optca={TOLS['abs_gap']};",
                                         *options_gams,
                                     ],
                                 )
@@ -251,43 +281,50 @@ def _run_benchmark(num_reactors, mode, current_time, time_limit=3600):
 if __name__ == "__main__":
     all_results = []
     NT = [i for i in range(5, 42)]  # Number of reactors to test.
-    #modes = ["original", "hull_quadratic", "naive_multiplication"]
     modes = ["original"]
     current_time = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-    time_limit = 3600
-    
-    all_strategies_time_limit_reached = False
+    time_limit = 300
+    all_solvers = ["gurobi", "baron", "scip"]
+
+    # Track which solvers are done (all their strategies hit time limit)
+    solvers_done = set()
+
     for num_reactors in NT:
-        if all_strategies_time_limit_reached:
+        active_solvers = [s for s in all_solvers if s not in solvers_done]
+        if not active_solvers:
+            print(f"All solvers have reached time limit on all strategies. Stopping.")
             break
-            
-        # Track time limit status for all strategies with this reactor count
-        strategies_time_limit_status = {}
-        
+
+        print(f"\n--- {num_reactors} reactors: running solvers {active_solvers} ---")
+
         for mode in modes:
-            summaries = _run_benchmark(num_reactors=num_reactors, mode=mode, current_time=current_time, time_limit=time_limit)
+            summaries = _run_benchmark(
+                num_reactors=num_reactors,
+                mode=mode,
+                current_time=current_time,
+                time_limit=time_limit,
+                solvers=active_solvers,
+            )
             all_results.extend(summaries)
             print(f"Finished benchmark for {num_reactors} reactors with mode {mode}")
-            print(f"Current time: {current_time}")
-            
-            # Track which strategies hit the time limit for this reactor count
-            for summary in summaries:
-                strategy = summary["strategy"]
-                if summary["solve_time_sec"] >= time_limit - 1:  # Allow 1 second margin
-                    print(f"Time limit reached for strategy '{strategy}' with {num_reactors} reactors")
-                    strategies_time_limit_status[strategy] = True
-            
-        # Check if all strategies reached time limit for this reactor count
-        if strategies_time_limit_status:
-            # Get unique strategies from this batch of summaries
-            unique_strategies = {summary["strategy"] for summary in summaries}
-            
-            # Check if all strategies hit the time limit
-            all_hit_limit = all(strategies_time_limit_status.get(strategy, False) for strategy in unique_strategies)
-            
-            if all_hit_limit and unique_strategies:
-                print(f"All strategies reached time limit with {num_reactors} reactors. Stopping further benchmarks.")
-                all_strategies_time_limit_reached = True
+
+            # Determine the set of strategies used in this run
+            unique_strategies = {s["strategy"] for s in summaries}
+
+            # Check per-solver whether all strategies hit the time limit
+            for solver in active_solvers:
+                solver_summaries = [s for s in summaries if s["solver"] == solver]
+                strategies_hit = {
+                    s["strategy"]
+                    for s in solver_summaries
+                    if s["solve_time_sec"] >= time_limit - 1
+                }
+                if strategies_hit:
+                    for st in strategies_hit:
+                        print(f"  Time limit reached: solver={solver}, strategy='{st}', reactors={num_reactors}")
+                if unique_strategies and strategies_hit == unique_strategies:
+                    print(f"  => Solver '{solver}' hit time limit on ALL strategies at {num_reactors} reactors. Will skip it for higher reactor counts.")
+                    solvers_done.add(solver)
 
     # Create an Excel summary of all benchmark runs.
     if all_results:

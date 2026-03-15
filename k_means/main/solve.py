@@ -12,11 +12,27 @@ import k_means
 import pandas as pd
 import pyomo.environ as pyo
 import pyomo.gdp.plugins.hull_exact
+import pyomo.gdp.plugins.hull_exact_conic
+import pyomo.gdp.plugins.hull_exact_conic_no_sqrt_extra_var
+import pyomo.gdp.plugins.hull_exact_conic_no_sqrt_no_extra_var
+import pyomo.gdp.plugins.hull_exact_conic_original
+import pyomo.gdp.plugins.hull_exact_conic_sqrt_extra_var
+import pyomo.gdp.plugins.hull_exact_conic_sqrt_no_extra_var
+import pyomo.gdp.plugins.hull_exact_conic_no_cholesky
 import pyomo.gdp.plugins.hull_reduced_y
+import pyomo.gdp.plugins.hull_exact_extra_var
+import pyomo.gdp.plugins.hull_exact_extra_var_inequal
 
 possible_modes = ["approximation", "exact", "reduced_power_y", "no_mode"]
 
-plugins = [pyomo.gdp.plugins.hull_exact, pyomo.gdp.plugins.hull_reduced_y]
+plugins = [
+    pyomo.gdp.plugins.hull_exact,
+    pyomo.gdp.plugins.hull_reduced_y,
+    pyomo.gdp.plugins.hull_exact_conic,
+    pyomo.gdp.plugins.hull_exact_conic_no_cholesky,
+    pyomo.gdp.plugins.hull_exact_extra_var,
+    pyomo.gdp.plugins.hull_exact_extra_var_inequal,
+]
 
 # Default parameters for k-means
 parameters = {
@@ -26,7 +42,28 @@ parameters = {
     "coord_range": (0.0, 10.0),
 }
 
-reformulation_strategies = ["gdp.hull", "gdp.bigm", "gdp.hull_exact", "gdp.hull_reduced_y"]
+reformulation_strategies = [
+    "gdp.hull",
+    "gdp.bigm",
+    "gdp.hull_exact",
+    "gdp.hull_reduced_y",
+    "gdp.hull_exact_conic_original",
+    "gdp.hull_exact_conic_no_sqrt_extra_var",
+    "gdp.hull_exact_conic_no_sqrt_no_extra_var",
+    "gdp.hull_exact_conic_sqrt_extra_var",
+    "gdp.hull_exact_conic_sqrt_no_extra_var",
+    "gdp.hull_exact_conic_no_cholesky",
+    "gdp.hull_exact_extra_var",
+    "gdp.hull_exact_extra_var_inequal",
+]
+
+TOLS = {
+    "rel_gap": 1e-6,
+    "abs_gap": 1e-10,
+    "feas": 1e-6,
+    "opt": 1e-6,
+    "int": 1e-5,
+}
 
 
 def save_model(model: pyo.ConcreteModel, directory: str, filename: str = "model.pkl") -> str:
@@ -214,8 +251,10 @@ def parse_root_relaxation(
 
             print("IPOPT root relaxation value not found in output log")
             return None
-        elif solver.lower() == "scip" or (
-            solver.lower() == "gams" and subsolver and subsolver.lower() == "scip"
+        elif (
+            solver.lower() == "scip"
+            or (solver.lower() == "gams" and subsolver and subsolver.lower() == "scip")
+            or (solver.lower() == "gams" and subsolver and subsolver.lower() == "scip_convex")
         ):
             # For SCIP
             trivial_preprocessing = re.search(
@@ -330,6 +369,120 @@ def parse_root_relaxation(
     except Exception as e:
         print(f"Error parsing output log: {str(e)}")
         return None
+
+
+def parse_solver_bounds(
+    output_log_path: str, solver: str = "gurobi", subsolver: Optional[str] = None
+) -> Tuple[Optional[float], Optional[float]]:
+    """
+    Parse the output log file to extract the lower and upper bounds.
+
+    Parameters
+    ----------
+    output_log_path : str
+        Path to the output log file
+    solver : str, optional
+        The solver used, by default "gurobi"
+    subsolver : Optional[str], optional
+        The subsolver used, by default None
+
+    Returns
+    -------
+    Tuple[Optional[float], Optional[float]]
+        A tuple of (lower_bound, upper_bound)
+    """
+    if not os.path.exists(output_log_path):
+        print(f"Warning: Output log file not found at {output_log_path}")
+        return None, None
+
+    try:
+        with open(output_log_path, "r") as f:
+            log_content = f.read()
+
+        lower_bound = None
+        upper_bound = None
+
+        # Handle GAMS with Gurobi subsolver
+        if solver.lower() == "gams" and subsolver and subsolver.lower() == "gurobi":
+            # Pattern: "Best objective X.XXXe+XX, best bound Y.YYYe+YY, gap Z.ZZ%"
+            gap_line_match = re.search(
+                r"[Bb]est objective\s+([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?),\s*"
+                r"best bound\s+([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?)",
+                log_content,
+            )
+            if gap_line_match:
+                upper_bound = float(gap_line_match.group(1))
+                lower_bound = float(gap_line_match.group(2))
+                print(f"Parsed bounds from Gurobi output: lower={lower_bound}, upper={upper_bound}")
+                return lower_bound, upper_bound
+
+            explored_match = re.search(
+                r"Explored \d+ nodes.*best objective\s+([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?),\s*"
+                r"best bound\s+([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?)",
+                log_content,
+                re.IGNORECASE,
+            )
+            if explored_match:
+                upper_bound = float(explored_match.group(1))
+                lower_bound = float(explored_match.group(2))
+                print(
+                    f"Parsed bounds from Gurobi explored line:\
+                         lower={lower_bound}, upper={upper_bound}"
+                )
+                return lower_bound, upper_bound
+
+        # Handle GAMS with BARON subsolver
+        elif solver.lower() == "gams" and subsolver and subsolver.lower() == "baron":
+            best_possible_match = re.search(
+                r"Best possible\s*=\s*([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?)", log_content
+            )
+            best_solution_match = re.search(
+                r"Best solution\s*=\s*([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?)", log_content
+            )
+            if best_possible_match:
+                lower_bound = float(best_possible_match.group(1))
+            if best_solution_match:
+                upper_bound = float(best_solution_match.group(1))
+            if lower_bound is not None or upper_bound is not None:
+                print(f"Parsed bounds from BARON output: lower={lower_bound}, upper={upper_bound}")
+                return lower_bound, upper_bound
+
+        # Handle direct Gurobi
+        elif solver.lower() == "gurobi":
+            gap_line_match = re.search(
+                r"[Bb]est objective\s+([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?),\s*"
+                r"best bound\s+([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?)",
+                log_content,
+            )
+            if gap_line_match:
+                upper_bound = float(gap_line_match.group(1))
+                lower_bound = float(gap_line_match.group(2))
+                print(f"Parsed bounds from Gurobi output: lower={lower_bound}, upper={upper_bound}")
+                return lower_bound, upper_bound
+
+        # Handle SCIP
+        elif solver.lower() == "scip" or (
+            solver.lower() == "gams" and subsolver and "scip" in subsolver.lower()
+        ):
+            dual_bound_match = re.search(
+                r"Dual Bound\s*:\s*([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?)", log_content
+            )
+            primal_bound_match = re.search(
+                r"Primal Bound\s*:\s*([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?)", log_content
+            )
+            if dual_bound_match:
+                lower_bound = float(dual_bound_match.group(1))
+            if primal_bound_match:
+                upper_bound = float(primal_bound_match.group(1))
+            if lower_bound is not None or upper_bound is not None:
+                print(f"Parsed bounds from SCIP output: lower={lower_bound}, upper={upper_bound}")
+                return lower_bound, upper_bound
+
+        return lower_bound, upper_bound
+
+    except Exception as e:
+        print(f"Error parsing solver bounds: {str(e)}")
+        return None, None
 
 
 def calculate_root_relaxation_gap(
@@ -481,32 +634,73 @@ def save_results(
             }
 
     # Get bound from solver results
-    bound = None
+    lower_bound = None
+    upper_bound = None
     try:
-        if hasattr(result, "solver") and hasattr(result.solver, "dual_bound"):
-            # SCIP stores the dual bound here, especially for time limit cases
-            bound = result.solver.dual_bound
-        elif hasattr(result, "problem") and hasattr(result.problem, "lower_bound"):
-            bound = result.problem.lower_bound
-        elif hasattr(result, "solver") and hasattr(result.solver, "best_objective_bound"):
-            bound = result.solver.best_objective_bound
-        elif hasattr(result, "solver") and hasattr(result.solver, "lower_bound"):
-            bound = result.solver.lower_bound
-        elif hasattr(result, "lower_bound"):
-            bound = result.lower_bound
+        # Check for Gurobi/standard Pyomo result structure where problem is a list
+        if hasattr(result, "problem") and len(result.problem) > 0:
+            prob = result.problem[0]
+            if hasattr(prob, "lower_bound"):
+                lower_bound = prob.lower_bound
+            if hasattr(prob, "upper_bound"):
+                upper_bound = prob.upper_bound
+
+        # SCIP stores the dual bound in solver section
+        if lower_bound is None and hasattr(result, "solver"):
+            if hasattr(result.solver, "dual_bound"):
+                lower_bound = result.solver.dual_bound
+            if hasattr(result.solver, "best_objective_bound"):
+                lower_bound = result.solver.best_objective_bound
+            if hasattr(result.solver, "lower_bound"):
+                lower_bound = result.solver.lower_bound
+            if hasattr(result.solver, "upper_bound"):
+                upper_bound = result.solver.upper_bound
+
+        # Fallback to top-level attributes
+        if lower_bound is None and hasattr(result, "lower_bound"):
+            lower_bound = result.lower_bound
+        if upper_bound is None and hasattr(result, "upper_bound"):
+            upper_bound = result.upper_bound
+
+        # If bounds are still not found, try parsing from output log
+        if lower_bound is None or upper_bound is None:
+            output_log_path = os.path.join(results_dir, "output_log.txt")
+            parsed_lower, parsed_upper = parse_solver_bounds(output_log_path, solver, subsolver)
+            if lower_bound is None and parsed_lower is not None:
+                lower_bound = parsed_lower
+            if upper_bound is None and parsed_upper is not None:
+                upper_bound = parsed_upper
+
+        # For direct Gurobi, also try the dedicated Gurobi log file.
+        if lower_bound is None or upper_bound is None:
+            gurobi_log_path = os.path.join(results_dir, "gurobi_solver.log")
+            if os.path.exists(gurobi_log_path):
+                parsed_lower, parsed_upper = parse_solver_bounds(
+                    gurobi_log_path, "gurobi", None
+                )
+                if lower_bound is None and parsed_lower is not None:
+                    lower_bound = parsed_lower
+                if upper_bound is None and parsed_upper is not None:
+                    upper_bound = parsed_upper
+
     except Exception as e:
         print(f"Warning: Could not extract bound from solver result: {str(e)}")
-        bound = None
+        lower_bound = None
+        upper_bound = None
 
-    solution["lower_bound"] = bound
+    solution["lower_bound"] = lower_bound
+    solution["upper_bound"] = upper_bound
 
     # Calculate gaps with proper error handling
     try:
         objective_value = solution.get("objective_value")
-        if objective_value is not None and bound is not None:
-            solution["absolute_gap"] = objective_value - bound
-            if abs(bound) != 0:
-                solution["relative_gap"] = solution["absolute_gap"] / abs(bound)
+        if objective_value is not None and lower_bound is not None:
+            solution["absolute_gap"] = objective_value - lower_bound
+            # Check if lower_bound is a valid non-zero number for relative gap calculation
+            if isinstance(lower_bound, (int, float)) and not (
+                lower_bound == 0 or lower_bound != lower_bound or abs(lower_bound) == float("inf")
+            ):  # lower_bound != lower_bound checks for NaN
+                solution["relative_gap"] = solution["absolute_gap"] / abs(lower_bound)
             else:
                 solution["relative_gap"] = None
         else:
@@ -720,8 +914,9 @@ def save_to_excel(
         "Status": solution["status"],
         "Objective Value": solution["objective_value"],
         "Lower Bound": solution["lower_bound"],
+        "Upper Bound": solution.get("upper_bound"),
         "Bound Absolute Gap": solution["absolute_gap"],
-        "Bound Relative Gap (%)": solution["relative_gap"],
+        "Bound Relative Gap": solution["relative_gap"],
         "Root Relaxation Value": root_relaxation_value,
         "Root Relaxation Gap (%)": root_relaxation_gap,
         "Relative Gap (%)": relaxation_gap if relaxation_gap is not None else None,
@@ -826,15 +1021,32 @@ def solve_with_solver(
         # Set up options based on subsolver
         if subsolver and subsolver.lower() == "baron":
             # BARON options through GAMS
-            options_gams = ["$onecho > baron.opt", "$offecho", "GAMS_MODEL.optfile=1"]
+            options_gams = [
+                "$onecho > baron.opt",
+                "MaxThreads 1",
+                f"EpsR {TOLS['rel_gap']}",
+                f"EpsA {TOLS['abs_gap']}",
+                f"AbsConFeasTol {TOLS['feas']}",
+                "RelConFeasTol 0",
+                f"AbsIntFeasTol {TOLS['int']}",
+                "RelIntFeasTol 0",
+                "$offecho",
+                "GAMS_MODEL.optfile=1;",
+            ]
             solver_name = "baron"
         elif subsolver and subsolver.lower() == "gurobi":
             # Default to Gurobi with GAMS
             options_gams = [
                 "$onecho > gurobi.opt",
                 "NonConvex 2",
+                "Threads 1",
+                f"MIPGap {TOLS['rel_gap']}",
+                f"MIPGapAbs {TOLS['abs_gap']}",
+                f"FeasibilityTol {TOLS['feas']}",
+                f"OptimalityTol {TOLS['opt']}",
+                f"IntFeasTol {TOLS['int']}",
                 "$offecho",
-                "GAMS_MODEL.optfile=1",
+                "GAMS_MODEL.optfile=1;",
             ]
             solver_name = "gurobi"
         elif subsolver and subsolver.lower() == "ipopth":
@@ -845,22 +1057,36 @@ def solve_with_solver(
                 "mu_strategy adaptive",
                 "tol 1e-6",
                 "$offecho",
-                "GAMS_MODEL.optfile=1",
+                "GAMS_MODEL.optfile=1;",
             ]
             solver_name = "ipopt"
-        elif subsolver and subsolver.lower() == "scip":
+        elif (
+            subsolver
+            and subsolver.lower() == "scip"
+            or subsolver
+            and subsolver.lower() == "scip_convex"
+        ):
             # SCIP through GAMS
+
             options_gams = [
                 "$onecho > scip.opt",
-                "limits/time = " + str(time_limit),
-                "numerics/feastol = 1e-6",
-                "numerics/epsilon = 1e-6",
-                "numerics/sumepsilon = 1e-6",
+                f"limits/time = {time_limit}",
+                "parallel/maxnthreads = 1",
+                f"limits/gap = {TOLS['rel_gap']}",
+                f"limits/absgap = {TOLS['abs_gap']}",
+                f"numerics/feastol = {TOLS['feas']}",
+                f"numerics/dualfeastol = {TOLS['opt']}",
+                f"numerics/sumepsilon = {TOLS['feas']}",
                 "display/verblevel = 4",
+            ]
+            if subsolver.lower() == "scip_convex":
+                options_gams.append("constraints/nonlinear/assumeconvex = TRUE")
+            options_gams += [
                 "$offecho",
-                "GAMS_MODEL.optfile=1",
+                "GAMS_MODEL.optfile=1;",
             ]
             solver_name = "scip"
+
         else:
             print(f"Using unsupported GAMS subsolver: {subsolver}")
             raise ValueError(f"Unsupported GAMS subsolver: {subsolver}")
@@ -870,14 +1096,14 @@ def solve_with_solver(
             model,
             solver=solver_name,
             tee=tee,
-            keepfiles=True,
+            keepfiles=False,
             tmpdir=results_dir,
             symbolic_solver_labels=True,
             add_options=[
                 f"option reslim={time_limit};",
                 "option threads=1;",
-                "option optcr=1e-6;",
-                "option optca=0;",
+                f"option optcr={TOLS['rel_gap']};",
+                f"option optca={TOLS['abs_gap']};",
                 *options_gams,
             ],
         )
@@ -889,8 +1115,15 @@ def solve_with_solver(
         opt.options["NonConvex"] = 2
         opt.options["TimeLimit"] = time_limit
         opt.options["Threads"] = 1
-        opt.options["MIPGap"] = 1e-6
-        opt.options["MIPGapAbs"] = 0
+        opt.options["MIPGap"] = TOLS["rel_gap"]
+        opt.options["MIPGapAbs"] = TOLS["abs_gap"]
+        opt.options["FeasibilityTol"] = TOLS["feas"]
+        opt.options["OptimalityTol"] = TOLS["opt"]
+        opt.options["IntFeasTol"] = TOLS["int"]
+
+        # Direct Gurobi's log to a file so we can parse bounds from it.
+        gurobi_log_path = os.path.join(results_dir, "gurobi_solver.log")
+        opt.options["LogFile"] = gurobi_log_path
 
         start = time.time()
         result = opt.solve(
@@ -910,8 +1143,15 @@ def solve_with_solver(
         opt.options["NonConvex"] = 2
         opt.options["TimeLimit"] = time_limit
         opt.options["Threads"] = 1
-        opt.options["MIPGap"] = 1e-6
-        opt.options["MIPGapAbs"] = 0
+        opt.options["MIPGap"] = TOLS["rel_gap"]
+        opt.options["MIPGapAbs"] = TOLS["abs_gap"]
+        opt.options["FeasibilityTol"] = TOLS["feas"]
+        opt.options["OptimalityTol"] = TOLS["opt"]
+        opt.options["IntFeasTol"] = TOLS["int"]
+
+        # Direct Gurobi's log to a file so we can parse bounds from it.
+        gurobi_log_path = os.path.join(results_dir, "gurobi_solver.log")
+        opt.options["LogFile"] = gurobi_log_path
 
         start = time.time()
         result = opt.solve(
@@ -923,24 +1163,25 @@ def solve_with_solver(
         # Clean up the persistent solver
         opt.client_to_solver = {}
         opt.solver_model = None
-    elif solver.lower() == "scip":
+    elif solver.lower() == "scip" or solver.lower() == "scip_convex":
         # Direct SCIP solver
         opt = pyo.SolverFactory("scip")
 
         # Set SCIP parameters
         opt.options["limits/time"] = time_limit
-        opt.options["numerics/feastol"] = 1e-6
-        opt.options["numerics/epsilon"] = 1e-6
-        opt.options["numerics/sumepsilon"] = 1e-6
-        opt.options["display/verblevel"] = 4
         opt.options["parallel/maxnthreads"] = 1
+        opt.options["limits/gap"] = TOLS["rel_gap"]
+        opt.options["limits/absgap"] = TOLS["abs_gap"]
+        opt.options["numerics/feastol"] = TOLS["feas"]
+        opt.options["numerics/dualfeastol"] = TOLS["opt"]
+        opt.options["numerics/sumepsilon"] = TOLS["feas"]
+        opt.options["display/verblevel"] = 4
 
         start = time.time()
         result = opt.solve(
             model,
             tee=tee,
             symbolic_solver_labels=True,
-            keepfiles=True,
         )
     else:
         raise ValueError(f"Unsupported solver: {solver} with subsolver: {subsolver}")
@@ -1068,7 +1309,15 @@ def solve_model(
 
         # Apply the reformulation strategy
         print(f"Applying reformulation strategy: {strategy}")
-        pyo.TransformationFactory(strategy).apply_to(model)
+        epsilon = None
+
+        if strategy.startswith("gdp.hull_eps"):
+            epsilon = float(strategy.split("_")[-1])
+
+        if strategy.startswith("gdp.hull") and epsilon is not None:
+            pyo.TransformationFactory("gdp.hull").apply_to(model, EPS=epsilon)
+        else:
+            pyo.TransformationFactory(strategy).apply_to(model)
 
         # Create a shared data structure to store all results for this strategy
         strategy_results: Dict[str, Dict[str, Any]] = {
@@ -1141,6 +1390,15 @@ def solve_model(
 
                 # Parse the output log for root relaxation value
                 root_relaxation_value = parse_root_relaxation(output_file, solver, subsolver)
+
+                # For direct Gurobi, also try the dedicated Gurobi log file
+                if root_relaxation_value is None:
+                    gurobi_log_path = os.path.join(results_dir, "gurobi_solver.log")
+                    if os.path.exists(gurobi_log_path):
+                        root_relaxation_value = parse_root_relaxation(
+                            gurobi_log_path, "gurobi", None
+                        )
+
                 strategy_results["original"]["root_relaxation_value"] = root_relaxation_value
 
                 # Save original problem results - gaps will be calculated later
@@ -1160,7 +1418,7 @@ def solve_model(
                 )
 
                 # Save pretty-printed model
-                save_model_pprint(model, results_dir, is_relaxation=False)
+                # save_model_pprint(model, results_dir, is_relaxation=False)
 
         # Solve the relaxation if requested
         if calculate_relaxation_gap or relaxation_only:
@@ -1218,6 +1476,15 @@ def solve_model(
                 relaxed_root_relaxation_value = parse_root_relaxation(
                     output_file, solver, subsolver
                 )
+
+                # For direct Gurobi, also try the dedicated Gurobi log file
+                if relaxed_root_relaxation_value is None:
+                    gurobi_log_path = os.path.join(results_dir, "gurobi_solver.log")
+                    if os.path.exists(gurobi_log_path):
+                        relaxed_root_relaxation_value = parse_root_relaxation(
+                            gurobi_log_path, "gurobi", None
+                        )
+
                 strategy_results["relaxation"]["root_relaxation_value"] = (
                     relaxed_root_relaxation_value
                 )
@@ -1373,7 +1640,7 @@ def solve_model(
                         print(f"Error updating Excel file: {str(e)}")
 
                 # Save pretty-printed relaxed model
-                save_model_pprint(relaxed_model, results_dir, is_relaxation=True)
+                # save_model_pprint(relaxed_model, results_dir, is_relaxation=True)
 
     return None
 

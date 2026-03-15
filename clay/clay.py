@@ -10,7 +10,16 @@ from pyomo.environ import ConcreteModel, SolverFactory, TransformationFactory, v
 
 # Import GDP plugins to make them available
 import pyomo.gdp.plugins.hull_exact
+import pyomo.gdp.plugins.hull_exact_conic
+import pyomo.gdp.plugins.hull_exact_conic_no_sqrt_extra_var
+import pyomo.gdp.plugins.hull_exact_conic_no_sqrt_no_extra_var
+import pyomo.gdp.plugins.hull_exact_conic_original
+import pyomo.gdp.plugins.hull_exact_conic_sqrt_extra_var
+import pyomo.gdp.plugins.hull_exact_conic_sqrt_no_extra_var
+import pyomo.gdp.plugins.hull_exact_conic_no_cholesky
 import pyomo.gdp.plugins.hull_reduced_y
+import pyomo.gdp.plugins.hull_exact_extra_var
+import pyomo.gdp.plugins.hull_exact_extra_var_inequal
 
 # Add the path to import the constrained layout model
 sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'pyomo', 'examples', 'gdp', 'constrained_layout'))
@@ -50,34 +59,62 @@ def solve_with_solver(
     Tuple[Any, float]
         Tuple containing (solver_result, duration)
     """
+    TOLS = {
+        "rel_gap": 1e-6,
+        "abs_gap": 1e-10,
+        "feas": 1e-6,
+        "opt": 1e-6,
+        "int": 1e-5,
+    }
+
     if solver.lower() == "gams":
         opt = pyo.SolverFactory("gams")
 
         # Set up options based on subsolver
         if subsolver and subsolver.lower() == "baron":
             # BARON options through GAMS
-            options_gams = ["$onecho > baron.opt", "$offecho", "GAMS_MODEL.optfile=1"]
+            options_gams = [
+                "$onecho > baron.opt",
+                "Threads 1",
+                f"EpsR {TOLS['rel_gap']}",
+                f"EpsA {TOLS['abs_gap']}",
+                f"AbsConFeasTol {TOLS['feas']}",
+                "RelConFeasTol 0",
+                f"AbsIntFeasTol {TOLS['int']}",
+                "RelIntFeasTol 0",
+                "$offecho",
+                "GAMS_MODEL.optfile=1;",
+            ]
             solver_name = "baron"
         elif subsolver and subsolver.lower() == "gurobi":
             # Gurobi with GAMS
             options_gams = [
                 "$onecho > gurobi.opt",
                 "NonConvex 2",
+                "Threads 1",
+                f"MIPGap {TOLS['rel_gap']}",
+                f"MIPGapAbs {TOLS['abs_gap']}",
+                f"FeasibilityTol {TOLS['feas']}",
+                f"OptimalityTol {TOLS['opt']}",
+                f"IntFeasTol {TOLS['int']}",
                 "$offecho",
-                "GAMS_MODEL.optfile=1",
+                "GAMS_MODEL.optfile=1;",
             ]
             solver_name = "gurobi"
         elif subsolver and subsolver.lower() == "scip":
             # SCIP through GAMS
             options_gams = [
                 "$onecho > scip.opt",
-                "limits/time = " + str(time_limit),
-                "numerics/feastol = 1e-6",
-                "numerics/epsilon = 1e-6",
-                "numerics/sumepsilon = 1e-6",
+                f"limits/time = {time_limit}",
+                "parallel/maxnthreads = 1",
+                f"limits/gap = {TOLS['rel_gap']}",
+                f"limits/absgap = {TOLS['abs_gap']}",
+                f"numerics/feastol = {TOLS['feas']}",
+                f"numerics/dualfeastol = {TOLS['opt']}",
+                f"numerics/sumepsilon = {TOLS['feas']}",
                 "display/verblevel = 4",
                 "$offecho",
-                "GAMS_MODEL.optfile=1",
+                "GAMS_MODEL.optfile=1;",
             ]
             solver_name = "scip"
         else:
@@ -93,8 +130,8 @@ def solve_with_solver(
             add_options=[
                 f"option reslim={time_limit};",
                 "option threads=1;",
-                "option optcr=1e-6;",
-                "option optca=0;",
+                f"option optcr={TOLS['rel_gap']};",
+                f"option optca={TOLS['abs_gap']};",
                 *options_gams,
             ],
         )
@@ -456,6 +493,8 @@ if __name__ == "__main__":
         "gdp.bigm", 
         "gdp.hull_exact",
         "gdp.binary_multiplication",
+        "gdp.hull_exact_conic_no_cholesky",
+
     ]
     
     solver_configs = [
@@ -468,7 +507,7 @@ if __name__ == "__main__":
     run_all_problems(
         reformulation_strategies=reformulation_strategies,
         solver_configs=solver_configs,
-        time_limit=1800,  
+        time_limit=300,  
         metrics=[
             "l1",
             "l2"],
