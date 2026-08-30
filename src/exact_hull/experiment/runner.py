@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
+import io
 import json
 import math
 import platform
@@ -524,6 +526,30 @@ def _base_record(
     )
 
 
+def _describe(error: BaseException) -> str:
+    """Error type and message; ``repr`` of OSError omits the offending path."""
+    return f"{type(error).__name__}: {error}"
+
+
+def _load_solution(model, result) -> bool:
+    """Load the solver's solution into ``model``; False when no usable incumbent exists.
+
+    GAMS reports ``NA`` variable levels when a solve ends without an incumbent (model
+    status 14). Pyomo's GAMS plugin still inserts a solution object, and loading it fails
+    on the NaN levels of indicator variables, so failure to load is the no-solution signal.
+    """
+    solutions = getattr(result, "solution", None)
+    if solutions is None:  # result objects without Pyomo's solution container
+        return True
+    if len(solutions) == 0:
+        return False
+    try:
+        model.solutions.load_from(result)
+    except (ValueError, TypeError, KeyError):
+        return False
+    return True
+
+
 def run_job(
     job: Job,
     output_directory: Path,
@@ -535,27 +561,36 @@ def run_job(
     try:
         model = benchmark.build(BenchmarkCase(job.instance_id, job.params, job.seed))
     except Exception as error:  # every planned job produces a result
-        return _base_record(job, "build_error", started, versions, repr(error))
+        return _base_record(job, "build_error", started, versions, _describe(error))
     try:
         TransformationFactory("core.logical_to_linear").apply_to(model)
         TransformationFactory(job.strategy).apply_to(model, **job.transformation_options)
     except Exception as error:
-        return _base_record(job, "transform_error", started, versions, repr(error))
+        return _base_record(job, "transform_error", started, versions, _describe(error))
     job_directory = output_directory / "jobs" / job.run_id
     scratch = job_directory / "scratch"
     log_path = job_directory / "solver.log"
     try:
         scratch.mkdir(parents=True, exist_ok=True)
         solver = SolverFactory("gams")
-        result = solver.solve(
-            model,
-            solver=job.subsolver,
-            add_options=options_for(job.subsolver, job.time_limit, job.variant),
-            tee=False,
-            logfile=str(log_path),
-            keepfiles=False,
-            tmpdir=str(scratch),
-        )
+        # keepfiles=True so Pyomo never tries to delete a primal GDX that GAMS did not
+        # write (no-incumbent timeouts); the scratch directory is removed below. Solutions
+        # are loaded manually because Pyomo crashes loading NaN levels into indicators.
+        try:
+            with contextlib.redirect_stdout(io.StringIO()):
+                result = solver.solve(
+                    model,
+                    solver=job.subsolver,
+                    add_options=options_for(job.subsolver, job.time_limit, job.variant),
+                    tee=False,
+                    logfile=str(log_path),
+                    keepfiles=True,
+                    load_solutions=False,
+                    tmpdir=str(scratch),
+                )
+        finally:
+            shutil.rmtree(scratch, ignore_errors=True)
+        has_solution = _load_solution(model, result)
         log_text = log_path.read_text(errors="replace") if log_path.exists() else ""
         record = _base_record(job, "solver_error", started, versions)
         record.solver_time_sec = _as_float(getattr(result.solver, "user_time", None))
@@ -576,12 +611,14 @@ def run_job(
             scale = max(abs(record.lower_bound), abs(record.upper_bound), 1e-12)
             record.rel_gap = record.abs_gap / scale
         objectives = list(model.component_data_objects(Objective, active=True))
-        if objectives:
+        if has_solution and objectives:
             record.objective = _as_float(value(objectives[0], exception=False))
-        try:
-            record.solution = benchmark.solution(model)
-        except (ValueError, TypeError):
-            record.solution = {}
+        record.solution = {}
+        if has_solution:
+            try:
+                record.solution = benchmark.solution(model)
+            except (ValueError, TypeError):
+                record.solution = {}
         record.duration_sec = time.perf_counter() - started
         record.status = _status(
             result,
@@ -596,7 +633,7 @@ def run_job(
         record.timestamp = datetime.now(UTC).isoformat()
         return record
     except Exception as error:
-        return _base_record(job, "solver_error", started, versions, repr(error))
+        return _base_record(job, "solver_error", started, versions, _describe(error))
 
 
 def run(config_path: Path, output_directory: Path, limit=None, resume=False) -> list[RunRecord]:

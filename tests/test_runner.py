@@ -42,7 +42,7 @@ def _record(run_id="run"):
     )
 
 
-def _job(run_id="run"):
+def _job(run_id="run", time_limit=10):
     return Job(
         run_id=run_id,
         benchmark="kmeans",
@@ -55,7 +55,7 @@ def _job(run_id="run"):
         solver="gams",
         subsolver="scip",
         variant=None,
-        time_limit=10,
+        time_limit=time_limit,
     )
 
 
@@ -400,3 +400,44 @@ def test_negative_limit_is_rejected_by_argparse(tmp_path):
     with pytest.raises(SystemExit) as error:
         main(["run", str(config), "--dry-run", "--limit", "-1"])
     assert error.value.code == 2
+
+
+def test_timeout_without_incumbent_records_no_objective(tmp_path, monkeypatch):
+    """GAMS reports NA levels for no-incumbent timeouts; Pyomo cannot load them."""
+
+    class TinyBenchmark:
+        @staticmethod
+        def build(case):
+            model = ConcreteModel()
+            model.x = Var(initialize=0)
+            model.objective = Objective(expr=model.x)
+            return model
+
+        @staticmethod
+        def solution(model):
+            return {"x": 0.0}
+
+    result = SimpleNamespace(
+        solver=SimpleNamespace(
+            status=SolverStatus.ok,
+            termination_condition=TerminationCondition.optimal,  # MODELSTAT overwrite
+            message=None,
+            user_time=6.0,
+        ),
+        problem=SimpleNamespace(lower_bound=-1.0, upper_bound=float("inf")),
+        solution=[SimpleNamespace()],  # a solution container Pyomo cannot load
+    )
+
+    class NoIncumbentSolver:
+        @staticmethod
+        def solve(*args, **kwargs):
+            return result
+
+    monkeypatch.setitem(runner.BENCHMARKS, "kmeans", TinyBenchmark())
+    monkeypatch.setattr(runner, "SolverFactory", lambda name: NoIncumbentSolver())
+    record = runner.run_job(_job(time_limit=5), tmp_path, versions={})
+    assert record.status == "timeout"
+    assert record.objective is None
+    assert record.solution == {}
+    assert record.lower_bound == -1.0
+    assert not (tmp_path / "jobs" / record.run_id / "scratch").exists()

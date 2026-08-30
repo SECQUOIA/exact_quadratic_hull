@@ -9,7 +9,14 @@ import tempfile
 from pathlib import Path
 
 import pyomo
-from pyomo.environ import ConcreteModel, Objective, SolverFactory, TransformationFactory, Var
+from pyomo.environ import (
+    Binary,
+    ConcreteModel,
+    Objective,
+    SolverFactory,
+    TransformationFactory,
+    Var,
+)
 from pyomo.opt import SolverStatus
 
 from exact_hull.analysis.tables import summary
@@ -70,9 +77,12 @@ def _doctor() -> int:
         print(f"gams interface: {state}")
         if state == "available":
             for subsolver in ("gurobi", "baron", "scip"):
+                # A tiny MIP: every campaign subsolver is registered for MIP in
+                # Pyomo's GAMS capability table, whereas SCIP is not listed for LP.
                 model = ConcreteModel()
                 model.x = Var(bounds=(0, None))
-                model.objective = Objective(expr=model.x)
+                model.y = Var(domain=Binary)
+                model.objective = Objective(expr=model.x + model.y)
                 try:
                     with tempfile.TemporaryDirectory(prefix="exact-hull-doctor-") as scratch:
                         result = SolverFactory("gams").solve(
