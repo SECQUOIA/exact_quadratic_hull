@@ -7,6 +7,9 @@ Experiment files use TOML and Python's standard `tomllib`. A file has one `[expe
 benchmark = "random_quadratic"
 base_seed = 7
 time_limit = 600
+modes = ["solve", "root", "relaxation"]
+root_time_limit = 600
+relaxation_time_limit = 600
 
 [instances]
 n_dimensions = [2, 3]
@@ -35,6 +38,8 @@ subsolver = "scip"
 variant = "convex"
 ```
 
-`benchmark` is one of `random_quadratic`, `kmeans`, `cstr`, or `clay`. Strategy options are explicit values passed to Pyomo; labels are presentation names only and do not affect job fingerprints. Computationally duplicate strategies and labels shared by different strategies are rejected. Unknown instance keys, transformations, subsolvers, and solver variants fail while loading the config. The only solver variant is `variant = "convex"` for SCIP; omit `variant` for Gurobi, BARON, or ordinary SCIP runs.
+`benchmark` is one of `random_quadratic`, `kmeans`, `cstr`, or `clay`. Strategy options are explicit values passed to Pyomo; labels are presentation names only and do not affect job fingerprints. Computationally duplicate strategies and labels shared by different strategies are rejected. Unknown instance keys, transformations, subsolvers, and solver variants fail while loading the config. The only solver variant is `variant = "convex"` for SCIP; omit `variant` for Gurobi or ordinary SCIP runs.
+
+`modes` is a nonempty, duplicate-free list drawn from `solve`, `root`, and `relaxation`; it defaults to `["solve"]`. A `root` job runs the transformed discrete model through node zero, while a `relaxation` job relaxes all integer variables after the GDP transformation. `root_time_limit` and `relaxation_time_limit` are optional positive finite numbers and default to `time_limit`. Each mode's effective time limit and full solver option list are part of the job fingerprint.
 
 A deterministic seed is derived from `base_seed` and each instance parameter map. It does not depend on Python's process-randomized hash or NumPy's global random state.

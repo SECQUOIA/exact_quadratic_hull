@@ -41,6 +41,9 @@ def performance_frames(
     planned_instances: list[str] | None = None,
 ) -> dict[SolverGroup, pd.DataFrame]:
     """Build one strategy matrix per solver group, retaining every planned instance."""
+    records = [record for record in records if record.mode == "solve"]
+    if planned_jobs is not None:
+        planned_jobs = [job for job in planned_jobs if job["mode"] == "solve"]
     truth = ground_truth(records)
     if planned_jobs is None:
         groups = sorted({_solver_group(record) for record in records}, key=repr)
@@ -93,7 +96,7 @@ def plot_run(run_directory: Path) -> list[Path]:
     manifest, records = read_campaign(run_directory)
     planned_jobs = manifest["planned_jobs"]
     planned_instances = [instance["instance_id"] for instance in manifest["instances"]]
-    styles = style_map(job["label"] for job in planned_jobs)
+    styles = style_map(job["label"] for job in planned_jobs if job["mode"] == "solve")
     destinations = []
     for group, frame in performance_frames(records, planned_jobs, planned_instances).items():
         if frame.empty:

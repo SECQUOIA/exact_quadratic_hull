@@ -19,6 +19,7 @@ def test_all_configs_load_and_expected_case_counts():
         "random_psd.toml": 240,
         "random_psd_conic.toml": 240,
         "random_nonconvex.toml": 100,
+        "eps_relaxation.toml": 240,
         "kmeans.toml": 96,
         "clay.toml": 12,
         "cstr.toml": 9,
@@ -151,11 +152,10 @@ subsolver = "scip"
         load_config(config)
 
 
-@pytest.mark.parametrize("subsolver", ["gurobi", "baron"])
-def test_unknown_solver_variant_fails_at_load(tmp_path, subsolver):
+def test_unknown_solver_variant_fails_at_load(tmp_path):
     config = tmp_path / "bad-variant.toml"
     config.write_text(
-        f"""
+        """
 [experiment]
 benchmark = "kmeans"
 [instances]
@@ -165,11 +165,43 @@ n_points = 3
 [[strategies]]
 name = "gdp.hull_exact"
 [[solvers]]
-subsolver = "{subsolver}"
+subsolver = "gurobi"
 variant = "mystery"
 """
     )
     with pytest.raises(ValueError, match="variant"):
+        load_config(config)
+
+
+@pytest.mark.parametrize(
+    ("name", "value"),
+    [
+        ("time_limit", "true"),
+        ("time_limit", '"60"'),
+        ("root_time_limit", "true"),
+        ("root_time_limit", '"60"'),
+        ("relaxation_time_limit", "true"),
+        ("relaxation_time_limit", '"60"'),
+    ],
+)
+def test_time_limits_reject_booleans_and_non_numeric_values(tmp_path, name, value):
+    config = tmp_path / "bad-time-limit.toml"
+    config.write_text(
+        f"""
+[experiment]
+benchmark = "kmeans"
+{name} = {value}
+[instances]
+n_dimensions = 2
+n_clusters = 2
+n_points = 3
+[[strategies]]
+name = "gdp.hull_exact"
+[[solvers]]
+subsolver = "scip"
+"""
+    )
+    with pytest.raises(ValueError, match=rf"experiment\.{name}"):
         load_config(config)
 
 
@@ -182,6 +214,44 @@ def test_job_fingerprint_includes_time_limit_and_variant():
     changed_variant["solvers"][0]["variant"] = "convex"
     assert expand_jobs(changed_time)[0].run_id != original
     assert expand_jobs(changed_variant)[0].run_id != original
+
+
+def test_modes_expand_with_effective_limits_and_distinct_identities():
+    config = load_config(ROOT / "configs" / "smoke.toml")
+    config["experiment"].update(
+        modes=["solve", "root", "relaxation"],
+        root_time_limit=3,
+        relaxation_time_limit=4,
+    )
+    jobs = expand_jobs(config)
+    assert [job.mode for job in jobs] == ["solve", "root", "relaxation"]
+    assert [job.time_limit for job in jobs] == [10, 3, 4]
+    assert len({job.run_id for job in jobs}) == 3
+
+
+@pytest.mark.parametrize(
+    ("modes", "message"),
+    [('["solve", "solve"]', "duplicates"), ('["unknown"]', "drawn from")],
+)
+def test_invalid_modes_are_rejected(tmp_path, modes, message):
+    config = tmp_path / "bad-modes.toml"
+    config.write_text(
+        f"""
+[experiment]
+benchmark = "kmeans"
+modes = {modes}
+[instances]
+n_dimensions = 2
+n_clusters = 2
+n_points = 3
+[[strategies]]
+name = "gdp.hull_exact"
+[[solvers]]
+subsolver = "scip"
+"""
+    )
+    with pytest.raises(ValueError, match=message):
+        load_config(config)
 
 
 def test_duplicate_planned_job_is_rejected():

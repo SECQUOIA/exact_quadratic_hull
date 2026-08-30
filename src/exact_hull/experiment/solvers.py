@@ -39,23 +39,6 @@ def gurobi_options(time_limit: float, variant: str | None = None) -> list[str]:
     ]
 
 
-def baron_options(time_limit: float, variant: str | None = None) -> list[str]:
-    if variant is not None:
-        raise ValueError(f"Unknown BARON variant: {variant}")
-    return _common(time_limit) + [
-        "$onecho > baron.opt",
-        "Threads 1",
-        f"EpsR {TOLS['rel_gap']:g}",
-        f"EpsA {TOLS['abs_gap']:g}",
-        f"AbsConFeasTol {TOLS['feas']:g}",
-        "RelConFeasTol 0",
-        f"AbsIntFeasTol {TOLS['int']:g}",
-        "RelIntFeasTol 0",
-        "$offecho",
-        "GAMS_MODEL.optfile=1;",
-    ]
-
-
 def scip_options(time_limit: float, variant: str | None = None) -> list[str]:
     if variant not in {None, "convex"}:
         raise ValueError(f"Unknown SCIP variant: {variant}")
@@ -77,13 +60,33 @@ def scip_options(time_limit: float, variant: str | None = None) -> list[str]:
 
 OPTION_BUILDERS: dict[str, Callable[[float, str | None], list[str]]] = {
     "gurobi": gurobi_options,
-    "baron": baron_options,
     "scip": scip_options,
 }
 
 
-def options_for(subsolver: str, time_limit: float, variant: str | None = None) -> list[str]:
+def options_for(
+    subsolver: str,
+    time_limit: float,
+    variant: str | None = None,
+    mode: str = "solve",
+) -> list[str]:
+    if mode not in {"solve", "root", "relaxation"}:
+        raise ValueError(f"Unknown job mode: {mode}")
     try:
-        return OPTION_BUILDERS[subsolver](time_limit, variant)
+        options = OPTION_BUILDERS[subsolver](time_limit, variant)
     except KeyError as error:
         raise ValueError(f"Unsupported GAMS subsolver: {subsolver}") from error
+    if mode != "root":
+        return options
+    insertion = options.index("$offecho")
+    if subsolver == "gurobi":
+        # Empirically, NodeLimit=1 lets Gurobi finish node 0 (including root
+        # cuts) while reporting one explored node and no processed child.
+        root_options = ["NodeLimit 1"]
+    else:
+        root_options = [
+            "limits/nodes = 1",
+            "limits/totalnodes = 1",
+            "limits/restarts = 0",
+        ]
+    return options[:insertion] + root_options + options[insertion:]

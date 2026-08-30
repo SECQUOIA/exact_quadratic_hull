@@ -20,7 +20,8 @@ def ground_truth(records: Iterable[RunRecord]) -> dict[str, float]:
     truth = {}
     for record in records:
         if (
-            record.status not in VERIFIED_OPTIMAL_STATUSES
+            record.mode != "solve"
+            or record.status not in VERIFIED_OPTIMAL_STATUSES
             or record.objective is None
             or not math.isfinite(record.objective)
         ):

@@ -2,6 +2,9 @@
 benchmark = "clay"
 base_seed = 20250606
 time_limit = 3600
+modes = ["solve", "root", "relaxation"]
+root_time_limit = 600
+relaxation_time_limit = 600
 
 [instances]
 instance = ["CLay0203", "CLay0204", "CLay0205", "CLay0303", "CLay0304", "CLay0305"]
@@ -25,9 +28,4 @@ subsolver = "gurobi"
 
 [[solvers]]
 name = "gams"
-subsolver = "baron"
-
-[[solvers]]
-name = "gams"
 subsolver = "scip"
-

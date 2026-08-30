@@ -1,7 +1,10 @@
 [experiment]
 benchmark = "random_quadratic"
-base_seed = 20250602
+base_seed = 20250601
 time_limit = 3600
+modes = ["solve", "root", "relaxation"]
+root_time_limit = 600
+relaxation_time_limit = 600
 
 [instances]
 n_dimensions = [3, 4, 5, 6, 7]
@@ -34,10 +37,6 @@ name = "gdp.hull_exact_conic_sqrt_extra_var"
 [[solvers]]
 name = "gams"
 subsolver = "gurobi"
-
-[[solvers]]
-name = "gams"
-subsolver = "baron"
 
 [[solvers]]
 name = "gams"

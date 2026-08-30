@@ -1,7 +1,8 @@
-SCIP version 9.2.4
-LP0 (12r, 9c): opt. [1.750000e+00]
-SCIP Status        : problem is solved [optimal solution found]
-Primal Bound       : +2.50000000000000e+00
-Dual Bound         : +2.00000000000000e+00
-SOLVER STATUS      1 Normal Completion
-
+SCIP             54.3.1 61154be4 Aug 21, 2026          LEG x86 64bit/Linux
+SCIP version 10.0.3 (d409edf9f6)
+Copyright (c) 2002-2026 Zuse Institute Berlin (ZIB)
+SCIP Status        : solving was interrupted [node limit reached]
+Solving Time (sec) : 3.82
+Solving Nodes      : 1
+Primal Bound       : -5.65952534920950e-01 (1 solutions)
+Dual Bound         : -5.97255461110791e-01

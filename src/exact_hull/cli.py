@@ -19,7 +19,7 @@ from pyomo.environ import (
 )
 from pyomo.opt import SolverStatus
 
-from exact_hull.analysis.tables import summary
+from exact_hull.analysis.tables import bounds, summary
 from exact_hull.experiment.results import aggregate, read_campaign
 from exact_hull.experiment.runner import expand_jobs, load_config, run
 from exact_hull.transformations import TRANSFORMATIONS
@@ -76,7 +76,7 @@ def _doctor() -> int:
         state = "available" if SolverFactory("gams").available(False) else "unavailable"
         print(f"gams interface: {state}")
         if state == "available":
-            for subsolver in ("gurobi", "baron", "scip"):
+            for subsolver in ("gurobi", "scip"):
                 # A tiny MIP: every campaign subsolver is registered for MIP in
                 # Pyomo's GAMS capability table, whereas SCIP is not listed for LP.
                 model = ConcreteModel()
@@ -120,14 +120,15 @@ def main(argv: list[str] | None = None) -> int:
         instance_count = len({job.instance_id for job in jobs})
         strategy_count = len({(job.strategy, job.label) for job in jobs})
         solver_count = len({(job.solver, job.subsolver, job.variant) for job in jobs})
+        mode_count = len({job.mode for job in jobs})
         print(
             f"planned jobs: {len(jobs)}; instances: {instance_count}; "
-            f"strategies: {strategy_count}; solvers: {solver_count}"
+            f"strategies: {strategy_count}; solvers: {solver_count}; modes: {mode_count}"
         )
         for job in jobs:
             print(
                 f"{job.run_id} {job.benchmark} {job.instance_id} "
-                f"{job.label} {job.solver}/{job.subsolver}"
+                f"{job.label} {job.solver}/{job.subsolver} {job.mode}"
             )
         if args.dry_run:
             return 0
@@ -141,6 +142,18 @@ def main(argv: list[str] | None = None) -> int:
         summary_path = run_directory / "summary.csv"
         summary(records).reset_index().to_csv(summary_path, index=False)
         print(summary_path)
+        bounds_path = run_directory / "bounds.csv"
+        bounds_frame = bounds(records)
+        bounds_frame.to_csv(bounds_path, index=False)
+        print(bounds_path)
+        mismatches = bounds_frame.loc[
+            bounds_frame["relaxation_matches_cehr"].eq(False), "instance_id"
+        ].unique()
+        if len(mismatches):
+            print(
+                "WARNING: GEHR and CEHR relaxation bounds differ for instances: "
+                + ", ".join(sorted(mismatches))
+            )
         return 0
     if args.command == "plot":
         from exact_hull.analysis.plots import plot_run

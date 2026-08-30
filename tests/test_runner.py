@@ -7,7 +7,7 @@ from types import SimpleNamespace
 
 import pandas as pd
 import pytest
-from pyomo.environ import ConcreteModel, Objective, Var
+from pyomo.environ import Binary, ConcreteModel, Objective, Var, maximize
 from pyomo.opt import SolverResults, SolverStatus, TerminationCondition
 
 from exact_hull.cli import main
@@ -34,6 +34,7 @@ def _record(run_id="run"):
         solver="gams",
         subsolver="scip",
         variant=None,
+        mode="solve",
         time_limit=10,
         duration_sec=1.5,
         solver_time_sec=1.0,
@@ -42,7 +43,7 @@ def _record(run_id="run"):
     )
 
 
-def _job(run_id="run", time_limit=10):
+def _job(run_id="run", time_limit=10, mode="solve"):
     return Job(
         run_id=run_id,
         benchmark="kmeans",
@@ -55,6 +56,7 @@ def _job(run_id="run", time_limit=10):
         solver="gams",
         subsolver="scip",
         variant=None,
+        mode=mode,
         time_limit=time_limit,
     )
 
@@ -71,6 +73,7 @@ def _record_for_job(job, **changes):
     record.solver = job.solver
     record.subsolver = job.subsolver
     record.variant = job.variant
+    record.mode = job.mode
     record.time_limit = job.time_limit
     for name, value in changes.items():
         setattr(record, name, value)
@@ -193,6 +196,42 @@ def test_real_gams_status_combinations_are_classified_safely():
     result.solver.status = SolverStatus.warning
     result.solver.termination_condition = TerminationCondition.optimal
     assert runner._status(result, "", "gurobi", 10, 1, 2, 0) == "solver_error"
+    assert (
+        runner._status(result, "Node limit reached", "gurobi", 10, 1, 2, 0.1, "root", -1.0)
+        == "node_limit"
+    )
+    assert (
+        runner._status(result, "Node limit reached", "gurobi", 10, 1, 2, None, "root", None)
+        == "node_limit"
+    )
+    assert runner._status(result, "", "gurobi", 10, 1, 2, 0.1, "root", -1.0) == "solver_error"
+    assert runner._status(result, "", "gurobi", 10, 1, 2, 0, "root", -1.0) == "optimal"
+    assert (
+        runner._status(
+            result, "Time limit reached\nNode limit reached", "gurobi", 10, 1, 2, 0.1, "root"
+        )
+        == "timeout"
+    )
+    assert (
+        runner._status(result, "Time limit reached", "gurobi", 10, 1, 2, 0, "relaxation")
+        == "solver_error"
+    )
+    result.solver.termination_condition = TerminationCondition.maxTimeLimit
+    assert runner._status(result, "", "gurobi", 10, 1, 2, None, "root", -1.0) == "timeout"
+    result.solver.status = SolverStatus.ok
+    result.solver.termination_condition = TerminationCondition.optimal
+    assert (
+        runner._status(result, "node limit reached", "scip", 10, 1, 2, 0.1, "root", -1.0)
+        == "node_limit"
+    )
+    assert runner._status(result, "", "scip", 10, 1, 2, 0.1, "root") == "feasible"
+    result.solver.termination_condition = TerminationCondition.globallyOptimal
+    assert runner._status(result, "", "scip", 10, 1, 2, None, "root") == "feasible"
+    result.solver.termination_condition = TerminationCondition.maxIterations
+    assert (
+        runner._status(result, "node limit reached", "scip", 10, 1, 2, None, "root", -1.0)
+        == "node_limit"
+    )
 
 
 def test_solver_diagnostic_ignores_undefined_pyomo_messages():
@@ -205,6 +244,68 @@ def test_nonfinite_pyomo_bounds_are_missing():
     assert runner._as_float(float("inf")) is None
     assert runner._as_float(float("-inf")) is None
     assert runner._as_float(float("nan")) is None
+    assert runner._as_bound(1e20) is None
+    assert runner._as_bound(-1e19) is None
+
+
+def test_non_minimization_objective_is_a_build_error(tmp_path, monkeypatch):
+    class MaximizationBenchmark:
+        @staticmethod
+        def build(case):
+            model = ConcreteModel()
+            model.x = Var(initialize=0)
+            model.objective = Objective(expr=model.x, sense=maximize)
+            return model
+
+    monkeypatch.setitem(runner.BENCHMARKS, "kmeans", MaximizationBenchmark())
+    record = runner.run_job(_job(), tmp_path, versions={})
+    assert record.status == "build_error"
+    assert "minimization objective" in record.error
+
+
+@pytest.mark.parametrize("discrete_count", [0, None])
+def test_relaxation_mode_removes_integrality_and_records_problem_statistics(
+    tmp_path, monkeypatch, discrete_count
+):
+    class BinaryBenchmark:
+        @staticmethod
+        def build(case):
+            model = ConcreteModel()
+            model.x = Var(domain=Binary, initialize=0)
+            model.objective = Objective(expr=model.x)
+            return model
+
+        @staticmethod
+        def solution(model):
+            return {"x": model.x.value}
+
+    class InspectingSolver:
+        @staticmethod
+        def solve(model, *args, **kwargs):
+            assert all(not variable.is_integer() for variable in model.component_data_objects(Var))
+            return SimpleNamespace(
+                solver=SimpleNamespace(
+                    status=SolverStatus.ok,
+                    termination_condition=TerminationCondition.optimal,
+                    user_time=0.1,
+                ),
+                problem=SimpleNamespace(
+                    lower_bound=0.0,
+                    upper_bound=0.0,
+                    number_of_variables=1,
+                    number_of_constraints=0,
+                    number_of_nonzeros=0,
+                    number_of_integer_variables=discrete_count,
+                ),
+            )
+
+    monkeypatch.setitem(runner.BENCHMARKS, "kmeans", BinaryBenchmark())
+    monkeypatch.setattr(runner, "SolverFactory", lambda name: InspectingSolver())
+    record = runner.run_job(_job(mode="relaxation"), tmp_path, versions={})
+    assert record.status == "optimal"
+    assert record.num_discrete_variables == discrete_count
+    assert (record.num_variables, record.num_constraints, record.num_nonzeros) == (1, 0, 0)
+    assert (record.solver_status, record.termination) == ("ok", "optimal")
 
 
 def test_git_sha_resolution_does_not_use_ambient_cwd(tmp_path, monkeypatch):
@@ -222,7 +323,7 @@ def test_resume_after_computational_config_change_is_rejected(tmp_path):
     try:
         runner.run(changed, tmp_path, limit=0, resume=True)
     except ValueError as error:
-        assert "config.experiment.time_limit differs" in str(error)
+        assert "config.experiment." in str(error) and "time_limit differs" in str(error)
     else:
         raise AssertionError("changed campaign resumed against a stale manifest")
 
@@ -342,6 +443,7 @@ def test_report_writes_detail_and_summary_outputs(tmp_path):
     assert main(["report", str(tmp_path)]) == 0
     assert (tmp_path / "results.csv").exists()
     assert (tmp_path / "summary.csv").exists()
+    assert (tmp_path / "bounds.csv").exists()
 
 
 def test_bad_typed_record_is_skipped_and_rerun_on_resume(tmp_path, monkeypatch):
@@ -393,6 +495,7 @@ def test_report_with_no_valid_records_writes_normal_headers(tmp_path):
     table = pd.read_csv(tmp_path / "summary.csv")
     assert {"run_id", "objective", "ground_truth", "correct"} <= set(results.columns)
     assert {"strategy", "status", "jobs", "median_solver_time_sec"} <= set(table.columns)
+    assert (tmp_path / "bounds.csv").exists()
 
 
 def test_negative_limit_is_rejected_by_argparse(tmp_path):
@@ -424,7 +527,7 @@ def test_timeout_without_incumbent_records_no_objective(tmp_path, monkeypatch):
             message=None,
             user_time=6.0,
         ),
-        problem=SimpleNamespace(lower_bound=-1.0, upper_bound=float("inf")),
+        problem=SimpleNamespace(lower_bound=-1.0, upper_bound=-0.08882106844809479),
         solution=[SimpleNamespace()],  # a solution container Pyomo cannot load
     )
 
@@ -440,4 +543,5 @@ def test_timeout_without_incumbent_records_no_objective(tmp_path, monkeypatch):
     assert record.objective is None
     assert record.solution == {}
     assert record.lower_bound == -1.0
+    assert record.upper_bound is None
     assert not (tmp_path / "jobs" / record.run_id / "scratch").exists()

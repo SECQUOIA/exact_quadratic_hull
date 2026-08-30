@@ -15,9 +15,6 @@ def test_shared_tolerance_policy_and_native_options():
     assert "option optca=1e-10;" in gurobi
     for name in ("MIPGapAbs", "FeasibilityTol", "OptimalityTol", "IntFeasTol"):
         assert name in gurobi
-    baron = "\n".join(options_for("baron", 60))
-    for name in ("EpsA", "AbsConFeasTol", "RelConFeasTol"):
-        assert name in baron
     scip = "\n".join(options_for("scip", 60))
     for name in ("limits/absgap", "numerics/feastol", "numerics/dualfeastol"):
         assert name in scip
@@ -27,7 +24,20 @@ def test_scip_convex_variant_is_an_option():
     assert "constraints/nonlinear/assumeconvex = TRUE" in options_for("scip", 60, "convex")
 
 
-@pytest.mark.parametrize("subsolver", ["gurobi", "baron", "scip"])
+@pytest.mark.parametrize("subsolver", ["gurobi", "scip"])
 def test_unknown_solver_variant_is_rejected(subsolver):
     with pytest.raises(ValueError, match="variant"):
         options_for(subsolver, 60, "unknown")
+
+
+def test_root_options_apply_node_limits_without_changing_tolerances():
+    gurobi = options_for("gurobi", 60, mode="root")
+    assert "NodeLimit 1" in gurobi
+    scip = options_for("scip", 60, mode="root")
+    assert {"limits/nodes = 1", "limits/totalnodes = 1", "limits/restarts = 0"} <= set(scip)
+    assert options_for("gurobi", 60, mode="relaxation") == options_for("gurobi", 60)
+
+
+def test_unsupported_subsolver_names_the_subsolver():
+    with pytest.raises(ValueError, match="Unsupported GAMS subsolver: baron"):
+        options_for("baron", 60)

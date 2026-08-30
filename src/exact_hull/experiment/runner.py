@@ -23,13 +23,9 @@ from pyomo.opt import SolverStatus, TerminationCondition
 
 from exact_hull.benchmarks import BENCHMARKS, INSTANCE_PARAMETERS
 from exact_hull.benchmarks.base import BenchmarkCase
-from exact_hull.experiment.logparse import (
-    parse_gams_solvestat,
-    parse_root_relaxation,
-    parse_solver_bounds,
-    solver_timed_out,
-)
+from exact_hull.experiment.logparse import parse_solver_bounds, solver_timed_out
 from exact_hull.experiment.results import (
+    RUN_MODES,
     RunRecord,
     is_valid_result,
     validate_manifest,
@@ -93,6 +89,7 @@ class Job:
     solver: str
     subsolver: str
     variant: str | None
+    mode: str
     time_limit: float
 
 
@@ -182,6 +179,16 @@ def _normalize_instances(benchmark: str, instances: dict[str, Any]) -> dict[str,
     return normalized
 
 
+def _time_limit(experiment: dict[str, Any], name: str, default: float) -> float:
+    raw = experiment.get(name, default)
+    if isinstance(raw, bool) or not isinstance(raw, int | float):
+        raise ValueError(f"experiment.{name} must be a positive finite number")
+    limit = float(raw)
+    if not math.isfinite(limit) or limit <= 0:
+        raise ValueError(f"experiment.{name} must be a positive finite number")
+    return limit
+
+
 def load_config(path: Path) -> dict[str, Any]:
     with path.open("rb") as stream:
         config = tomllib.load(stream)
@@ -211,15 +218,27 @@ def load_config(path: Path) -> dict[str, Any]:
         identities.add(identity)
         labels[label] = identity
         strategies.append({"name": name, "label": label, "options": options})
+    time_limit = _time_limit(experiment, "time_limit", 3600)
+    modes = experiment.get("modes", ["solve"])
+    if (
+        not isinstance(modes, list)
+        or not modes
+        or any(not isinstance(mode, str) or mode not in RUN_MODES for mode in modes)
+    ):
+        raise ValueError(f"experiment.modes must be a nonempty list drawn from {sorted(RUN_MODES)}")
+    if len(modes) != len(set(modes)):
+        raise ValueError("experiment.modes must not contain duplicates")
+    root_time_limit = _time_limit(experiment, "root_time_limit", time_limit)
+    relaxation_time_limit = _time_limit(experiment, "relaxation_time_limit", time_limit)
     solvers = []
-    time_limit = float(experiment.get("time_limit", 3600))
     for raw_solver in config["solvers"]:
         solver_name = raw_solver.get("name", "gams")
         if solver_name != "gams":
             raise ValueError("Only the GAMS solver interface is supported")
         subsolver = raw_solver["subsolver"]
         variant = raw_solver.get("variant")
-        options_for(subsolver, time_limit, variant)
+        for mode in modes:
+            options_for(subsolver, time_limit, variant, mode)
         solvers.append({"name": solver_name, "subsolver": subsolver, "variant": variant})
     instances = _normalize_instances(benchmark, raw_instances)
     return {
@@ -227,6 +246,9 @@ def load_config(path: Path) -> dict[str, Any]:
             "benchmark": benchmark,
             "base_seed": int(experiment.get("base_seed", 0)),
             "time_limit": time_limit,
+            "modes": modes,
+            "root_time_limit": root_time_limit,
+            "relaxation_time_limit": relaxation_time_limit,
         },
         "instances": instances,
         "strategies": strategies,
@@ -237,7 +259,13 @@ def load_config(path: Path) -> dict[str, Any]:
 def expand_jobs(config: dict[str, Any]) -> list[Job]:
     experiment = config["experiment"]
     benchmark_name = experiment["benchmark"]
-    time_limit = float(experiment.get("time_limit", 3600))
+    limits = {
+        "solve": float(experiment.get("time_limit", 3600)),
+        "root": float(experiment.get("root_time_limit", experiment.get("time_limit", 3600))),
+        "relaxation": float(
+            experiment.get("relaxation_time_limit", experiment.get("time_limit", 3600))
+        ),
+    }
     cases = BENCHMARKS[benchmark_name].cases(
         config.get("instances", {}), int(experiment.get("base_seed", 0))
     )
@@ -246,41 +274,45 @@ def expand_jobs(config: dict[str, Any]) -> list[Job]:
     for case in cases:
         for strategy in config["strategies"]:
             for solver in config["solvers"]:
-                variant = solver.get("variant")
-                solve_options = options_for(solver["subsolver"], time_limit, variant)
-                identity = {
-                    "benchmark": benchmark_name,
-                    "instance_params": case.params,
-                    "seed": case.seed,
-                    "transformation": strategy["name"],
-                    "transformation_options": strategy["options"],
-                    "solver": solver["name"],
-                    "subsolver": solver["subsolver"],
-                    "variant": variant,
-                    "time_limit": time_limit,
-                    "solver_options": solve_options,
-                }
-                fingerprint = _canonical(identity)
-                run_id = hashlib.sha256(fingerprint.encode()).hexdigest()[:16]
-                if run_id in seen:
-                    raise ValueError(f"Duplicate planned job fingerprint: {run_id}")
-                seen.add(run_id)
-                jobs.append(
-                    Job(
-                        run_id,
-                        benchmark_name,
-                        case.instance_id,
-                        case.params,
-                        case.seed,
-                        strategy["name"],
-                        strategy.get("label", strategy["name"]),
-                        strategy.get("options", {}),
-                        solver.get("name", "gams"),
-                        solver["subsolver"],
-                        variant,
-                        time_limit,
+                for mode in experiment.get("modes", ["solve"]):
+                    variant = solver.get("variant")
+                    time_limit = limits[mode]
+                    solve_options = options_for(solver["subsolver"], time_limit, variant, mode)
+                    identity = {
+                        "benchmark": benchmark_name,
+                        "instance_params": case.params,
+                        "seed": case.seed,
+                        "transformation": strategy["name"],
+                        "transformation_options": strategy["options"],
+                        "solver": solver["name"],
+                        "subsolver": solver["subsolver"],
+                        "variant": variant,
+                        "mode": mode,
+                        "time_limit": time_limit,
+                        "solver_options": solve_options,
+                    }
+                    fingerprint = _canonical(identity)
+                    run_id = hashlib.sha256(fingerprint.encode()).hexdigest()[:16]
+                    if run_id in seen:
+                        raise ValueError(f"Duplicate planned job fingerprint: {run_id}")
+                    seen.add(run_id)
+                    jobs.append(
+                        Job(
+                            run_id,
+                            benchmark_name,
+                            case.instance_id,
+                            case.params,
+                            case.seed,
+                            strategy["name"],
+                            strategy.get("label", strategy["name"]),
+                            strategy.get("options", {}),
+                            solver.get("name", "gams"),
+                            solver["subsolver"],
+                            variant,
+                            mode,
+                            time_limit,
+                        )
                     )
-                )
     return jobs
 
 
@@ -426,6 +458,18 @@ def _as_float(candidate) -> float | None:
     return result if math.isfinite(result) else None
 
 
+def _as_bound(candidate) -> float | None:
+    result = _as_float(candidate)
+    return result if result is not None and abs(result) < 1e19 else None
+
+
+def _as_int(candidate) -> int | None:
+    result = _as_float(candidate)
+    if result is None or result < 0 or not result.is_integer():
+        return None
+    return int(result)
+
+
 def _status(
     result,
     log_text: str,
@@ -434,10 +478,14 @@ def _status(
     solver_time_sec: float | None,
     wall_time_sec: float,
     rel_gap: float | None,
+    mode: str = "solve",
+    lower_bound: float | None = None,
 ) -> str:
     termination = result.solver.termination_condition
-    solvestat = parse_gams_solvestat(log_text)
-    if result.solver.status in {SolverStatus.error, SolverStatus.aborted, SolverStatus.warning}:
+    solver_status = result.solver.status
+    if solver_status in {SolverStatus.error, SolverStatus.aborted}:
+        return "solver_error"
+    if solver_status == SolverStatus.warning and mode != "root":
         return "solver_error"
     if (
         termination
@@ -448,18 +496,25 @@ def _status(
         }
         and rel_gap is not None
         and rel_gap <= 1e-12
+        and (solver_status != SolverStatus.warning or mode == "root")
     ):
         return (
             "globally_optimal" if termination == TerminationCondition.globallyOptimal else "optimal"
         )
-    if solvestat == 3 or solver_timed_out(log_text, subsolver):
+    if solver_timed_out(log_text, subsolver):
         return "timeout"
+    # Pyomo collapses GAMS modelstat 1 and 8, while Gurobi uses solvestat 4
+    # for node limits, so only the solver log distinguishes this stop from an optimum.
+    if mode == "root" and "node limit reached" in log_text.lower():
+        return "node_limit"
     if termination in {
         TerminationCondition.maxTimeLimit,
         TerminationCondition.maxIterations,
         TerminationCondition.maxEvaluations,
     }:
         return "timeout"
+    if solver_status == SolverStatus.warning:
+        return "solver_error"
     effective_time = solver_time_sec if solver_time_sec is not None else wall_time_sec
     if (
         termination
@@ -472,6 +527,18 @@ def _status(
         and (rel_gap is None or rel_gap > 1e-12)
     ):
         return "timeout"
+    if (
+        mode == "root"
+        and termination
+        in {
+            TerminationCondition.globallyOptimal,
+            TerminationCondition.optimal,
+            TerminationCondition.feasible,
+            TerminationCondition.other,
+        }
+        and (rel_gap is None or rel_gap > 1e-12)
+    ):
+        return "feasible"
     if termination == TerminationCondition.globallyOptimal:
         return "globally_optimal"
     if termination == TerminationCondition.optimal:
@@ -516,6 +583,7 @@ def _base_record(
         solver=job.solver,
         subsolver=job.subsolver,
         variant=job.variant,
+        mode=job.mode,
         time_limit=job.time_limit,
         duration_sec=time.perf_counter() - started,
         solver_time_sec=None,
@@ -562,9 +630,20 @@ def run_job(
         model = benchmark.build(BenchmarkCase(job.instance_id, job.params, job.seed))
     except Exception as error:  # every planned job produces a result
         return _base_record(job, "build_error", started, versions, _describe(error))
+    objectives = list(model.component_data_objects(Objective, active=True))
+    if len(objectives) != 1 or not objectives[0].is_minimizing():
+        return _base_record(
+            job,
+            "build_error",
+            started,
+            versions,
+            "The model must have exactly one active minimization objective",
+        )
     try:
         TransformationFactory("core.logical_to_linear").apply_to(model)
         TransformationFactory(job.strategy).apply_to(model, **job.transformation_options)
+        if job.mode == "relaxation":
+            TransformationFactory("core.relax_integer_vars").apply_to(model)
     except Exception as error:
         return _base_record(job, "transform_error", started, versions, _describe(error))
     job_directory = output_directory / "jobs" / job.run_id
@@ -581,7 +660,7 @@ def run_job(
                 result = solver.solve(
                     model,
                     solver=job.subsolver,
-                    add_options=options_for(job.subsolver, job.time_limit, job.variant),
+                    add_options=options_for(job.subsolver, job.time_limit, job.variant, job.mode),
                     tee=False,
                     logfile=str(log_path),
                     keepfiles=True,
@@ -594,23 +673,32 @@ def run_job(
         log_text = log_path.read_text(errors="replace") if log_path.exists() else ""
         record = _base_record(job, "solver_error", started, versions)
         record.solver_time_sec = _as_float(getattr(result.solver, "user_time", None))
+        record.solver_status = str(result.solver.status)
+        record.termination = str(result.solver.termination_condition)
         problem = result.problem
-        record.lower_bound = _as_float(getattr(problem, "lower_bound", None))
-        record.upper_bound = _as_float(getattr(problem, "upper_bound", None))
+        record.lower_bound = _as_bound(getattr(problem, "lower_bound", None))
+        record.upper_bound = _as_bound(getattr(problem, "upper_bound", None))
+        record.num_variables = _as_int(getattr(problem, "number_of_variables", None))
+        record.num_constraints = _as_int(getattr(problem, "number_of_constraints", None))
+        record.num_nonzeros = _as_int(getattr(problem, "number_of_nonzeros", None))
+        record.num_discrete_variables = _as_int(
+            getattr(problem, "number_of_integer_variables", None)
+        )
         if log_text:
-            record.root_relaxation = parse_root_relaxation(log_text, job.subsolver)
             parsed_lower, parsed_upper = parse_solver_bounds(log_text, job.subsolver)
             record.lower_bound = (
-                record.lower_bound if record.lower_bound is not None else parsed_lower
+                record.lower_bound if record.lower_bound is not None else _as_bound(parsed_lower)
             )
             record.upper_bound = (
-                record.upper_bound if record.upper_bound is not None else parsed_upper
+                record.upper_bound if record.upper_bound is not None else _as_bound(parsed_upper)
             )
+        if not has_solution:
+            record.upper_bound = None
+            record.objective = None
         if record.lower_bound is not None and record.upper_bound is not None:
             record.abs_gap = abs(record.upper_bound - record.lower_bound)
             scale = max(abs(record.lower_bound), abs(record.upper_bound), 1e-12)
             record.rel_gap = record.abs_gap / scale
-        objectives = list(model.component_data_objects(Objective, active=True))
         if has_solution and objectives:
             record.objective = _as_float(value(objectives[0], exception=False))
         record.solution = {}
@@ -628,8 +716,21 @@ def run_job(
             record.solver_time_sec,
             record.duration_sec,
             record.rel_gap,
+            job.mode,
+            record.lower_bound,
         )
-        record.error = _solver_diagnostic(result) if record.status == "solver_error" else None
+        if (
+            job.mode == "relaxation"
+            and record.num_discrete_variables is not None
+            and record.num_discrete_variables != 0
+        ):
+            record.status = "transform_error"
+            record.error = (
+                "Integrality relaxation left "
+                f"{record.num_discrete_variables!r} discrete variables in the solved model"
+            )
+        elif record.status == "solver_error":
+            record.error = _solver_diagnostic(result)
         record.timestamp = datetime.now(UTC).isoformat()
         return record
     except Exception as error:

@@ -19,6 +19,7 @@ RunStatus = Literal[
     "locally_optimal",
     "feasible",
     "timeout",
+    "node_limit",
     "infeasible",
     "solver_error",
     "build_error",
@@ -31,6 +32,7 @@ RUN_STATUSES = frozenset(
         "locally_optimal",
         "feasible",
         "timeout",
+        "node_limit",
         "infeasible",
         "solver_error",
         "build_error",
@@ -38,6 +40,7 @@ RUN_STATUSES = frozenset(
     }
 )
 VERIFIED_OPTIMAL_STATUSES = frozenset({"optimal", "globally_optimal"})
+RUN_MODES = frozenset({"solve", "root", "relaxation"})
 
 
 @dataclass
@@ -53,6 +56,7 @@ class RunRecord:
     solver: str
     subsolver: str
     variant: str | None
+    mode: str
     time_limit: float
     duration_sec: float | None
     solver_time_sec: float | None
@@ -62,7 +66,12 @@ class RunRecord:
     upper_bound: float | None = None
     abs_gap: float | None = None
     rel_gap: float | None = None
-    root_relaxation: float | None = None
+    num_variables: int | None = None
+    num_constraints: int | None = None
+    num_nonzeros: int | None = None
+    num_discrete_variables: int | None = None
+    solver_status: str | None = None
+    termination: str | None = None
     solution: dict[str, Any] = field(default_factory=dict)
     timestamp: str = ""
     versions: dict[str, str | None] = field(default_factory=dict)
@@ -77,6 +86,8 @@ class RunRecord:
             raise ValueError("Run record run_id must be a nonempty string")
         if record.status not in RUN_STATUSES:
             raise ValueError(f"Unknown run status: {record.status}")
+        if record.mode not in RUN_MODES:
+            raise ValueError(f"Unknown run mode: {record.mode}")
         for name in (
             "benchmark",
             "instance_id",
@@ -92,6 +103,10 @@ class RunRecord:
             raise TypeError("Run record variant must be a string or null")
         if record.error is not None and not isinstance(record.error, str):
             raise TypeError("Run record error must be a string or null")
+        for name in ("solver_status", "termination"):
+            value = getattr(record, name)
+            if value is not None and not isinstance(value, str):
+                raise TypeError(f"Run record {name} must be a string or null")
         for name in ("instance_params", "transformation_options", "solution", "versions"):
             if not isinstance(getattr(record, name), dict):
                 raise TypeError(f"Run record {name} must be an object")
@@ -100,8 +115,19 @@ class RunRecord:
         _validate_number("time_limit", record.time_limit, optional=False, nonnegative=True)
         for name in ("duration_sec", "solver_time_sec", "abs_gap", "rel_gap"):
             _validate_number(name, getattr(record, name), optional=True, nonnegative=True)
-        for name in ("objective", "lower_bound", "upper_bound", "root_relaxation"):
+        for name in ("objective", "lower_bound", "upper_bound"):
             _validate_number(name, getattr(record, name), optional=True)
+        for name in (
+            "num_variables",
+            "num_constraints",
+            "num_nonzeros",
+            "num_discrete_variables",
+        ):
+            value = getattr(record, name)
+            if value is not None and (
+                isinstance(value, bool) or not isinstance(value, int) or value < 0
+            ):
+                raise TypeError(f"Run record {name} must be a nonnegative integer or null")
         return record
 
 
@@ -159,6 +185,7 @@ def _validate_record_identity(record: RunRecord, planned_job: dict[str, Any]) ->
         "solver": planned_job["solver"],
         "subsolver": planned_job["subsolver"],
         "variant": planned_job["variant"],
+        "mode": planned_job["mode"],
     }
     for name, value in expected.items():
         if getattr(record, name) != value:
@@ -185,6 +212,7 @@ def validate_manifest(manifest: Any) -> dict[str, dict[str, Any]]:
         "solver",
         "subsolver",
         "variant",
+        "mode",
     }
     indexed = {}
     for index, job in enumerate(planned_jobs):
@@ -203,6 +231,8 @@ def validate_manifest(manifest: Any) -> dict[str, dict[str, Any]]:
                 raise TypeError(f"manifest planned_jobs[{index}].{name} must be a string")
         if job["variant"] is not None and not isinstance(job["variant"], str):
             raise TypeError(f"manifest planned_jobs[{index}].variant must be a string or null")
+        if job["mode"] not in RUN_MODES:
+            raise ValueError(f"manifest planned_jobs[{index}].mode is invalid")
         indexed[run_id] = job
     instances = manifest.get("instances")
     if not isinstance(instances, list) or not all(
@@ -261,8 +291,10 @@ def aggregate(
     for record in records:
         row = asdict(record)
         row["ground_truth"] = truth.get(record.instance_id)
-        row["correct"] = record.status in VERIFIED_OPTIMAL_STATUSES and is_correct(
-            record.objective, row["ground_truth"]
+        row["correct"] = (
+            record.mode == "solve"
+            and record.status in VERIFIED_OPTIMAL_STATUSES
+            and is_correct(record.objective, row["ground_truth"])
         )
         for field_name in ("instance_params", "transformation_options", "solution", "versions"):
             row[field_name] = json.dumps(row[field_name], sort_keys=True)

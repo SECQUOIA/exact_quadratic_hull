@@ -2,6 +2,9 @@
 benchmark = "random_quadratic"
 base_seed = 20250603
 time_limit = 3600
+modes = ["solve", "root", "relaxation"]
+root_time_limit = 600
+relaxation_time_limit = 600
 
 [instances]
 n_dimensions = [2, 3, 4, 5]
@@ -25,9 +28,4 @@ subsolver = "gurobi"
 
 [[solvers]]
 name = "gams"
-subsolver = "baron"
-
-[[solvers]]
-name = "gams"
 subsolver = "scip"
-

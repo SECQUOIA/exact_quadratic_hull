@@ -1,0 +1,66 @@
+[experiment]
+benchmark = "random_quadratic"
+base_seed = 20250601
+time_limit = 3600
+modes = ["relaxation"]
+relaxation_time_limit = 600
+
+[instances]
+n_dimensions = [3, 4, 5, 6, 7]
+n_disjunctions = [3, 4, 5, 6, 7, 8, 9, 10]
+n_disjuncts_per_disjunction = [10, 11, 12, 13, 14, 15]
+n_constraints_per_disjunct = 10
+n_feasible_regions = 10
+ensure_positive_definite = true
+
+[[strategies]]
+name = "gdp.hull"
+label = "hull-eps-1e-1"
+[strategies.options]
+EPS = 1e-1
+
+[[strategies]]
+name = "gdp.hull"
+label = "hull-eps-1e-2"
+[strategies.options]
+EPS = 1e-2
+
+[[strategies]]
+name = "gdp.hull"
+label = "hull-eps-1e-3"
+[strategies.options]
+EPS = 1e-3
+
+[[strategies]]
+name = "gdp.hull"
+label = "hull-eps-1e-4"
+[strategies.options]
+EPS = 1e-4
+
+[[strategies]]
+name = "gdp.hull"
+label = "hull-eps-1e-5"
+[strategies.options]
+EPS = 1e-5
+
+[[strategies]]
+name = "gdp.hull"
+label = "hull-eps-1e-6"
+[strategies.options]
+EPS = 1e-6
+
+[[strategies]]
+name = "gdp.hull_exact"
+label = "GEHR"
+
+[[strategies]]
+name = "gdp.hull_exact_conic_no_cholesky"
+label = "CEHR"
+
+[[solvers]]
+name = "gams"
+subsolver = "gurobi"
+
+[[solvers]]
+name = "gams"
+subsolver = "scip"

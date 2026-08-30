@@ -7,6 +7,7 @@ import pytest
 from exact_hull.analysis.outcomes import ground_truth, is_correct
 from exact_hull.analysis.plots import performance_frames, style_map
 from exact_hull.analysis.profiles import dolan_more
+from exact_hull.analysis.tables import bounds, summary
 from exact_hull.experiment.results import (
     RunRecord,
     read_campaign,
@@ -28,6 +29,7 @@ def record(**changes):
         solver="gams",
         subsolver="scip",
         variant=None,
+        mode="solve",
         time_limit=10,
         duration_sec=1,
         solver_time_sec=1,
@@ -50,6 +52,101 @@ def test_timed_out_low_objective_cannot_poison_ground_truth():
 
 def test_nonfinite_objective_cannot_be_ground_truth():
     assert ground_truth([record(objective=float("nan")), record(objective=float("inf"))]) == {}
+
+
+def test_non_solve_modes_are_excluded_from_ground_truth_summary_and_profiles():
+    records = [
+        record(run_id="solve", objective=5),
+        record(run_id="root", mode="root", objective=-10, solver_time_sec=0.1),
+        record(run_id="relax", mode="relaxation", objective=-20, solver_time_sec=0.1),
+    ]
+    assert ground_truth(records) == {"i": 5}
+    assert summary(records)["jobs"].sum() == 1
+    frame = performance_frames(records)[("gams", "scip", None)]
+    assert frame.at["i", "s"] == 1
+
+
+def test_bounds_combines_modes_and_checks_gehr_cehr_relaxations():
+    records = [
+        record(run_id="solve", objective=5, lower_bound=5),
+        record(run_id="root", mode="root", status="node_limit", objective=None, lower_bound=4),
+        record(
+            run_id="relax-gehr",
+            mode="relaxation",
+            objective=3,
+            lower_bound=3,
+        ),
+        record(
+            run_id="relax-cehr",
+            mode="relaxation",
+            strategy="CEHR",
+            transformation="gdp.hull_exact_conic_no_cholesky",
+            objective=3,
+            lower_bound=3,
+        ),
+    ]
+    table = bounds(records)
+    gehr = table.loc[table["transformation"] == "gdp.hull_exact"].iloc[0]
+    assert gehr["ground_truth"] == 5
+    assert gehr["root_bound"] == 4
+    assert gehr["relaxation_bound"] == gehr["relaxation_value"] == 3
+    assert gehr["relaxation_certified"]
+    assert gehr["root_gap"] == pytest.approx(0.2)
+    assert gehr["relaxation_gap"] == pytest.approx(0.4)
+    assert gehr["relaxation_matches_cehr"]
+
+
+def test_feasible_relaxation_is_certified_when_primal_and_bound_agree():
+    table = bounds(
+        [
+            record(run_id="solve", objective=5),
+            record(
+                run_id="relax",
+                mode="relaxation",
+                status="feasible",
+                solver_status="ok",
+                objective=3.00001,
+                lower_bound=3,
+            ),
+        ]
+    )
+    assert table.iloc[0]["relaxation_certified"]
+
+
+def test_uncertified_relaxations_are_not_compared_and_incomplete_roots_have_no_gap():
+    table = bounds(
+        [
+            record(run_id="solve", objective=5, lower_bound=5),
+            record(
+                run_id="root",
+                strategy="incomplete",
+                transformation="gdp.hull",
+                mode="root",
+                status="timeout",
+                objective=None,
+                lower_bound=4,
+            ),
+            record(
+                run_id="relax-gehr",
+                mode="relaxation",
+                status="timeout",
+                objective=3,
+                lower_bound=2,
+            ),
+            record(
+                run_id="relax-cehr",
+                mode="relaxation",
+                strategy="CEHR",
+                transformation="gdp.hull_exact_conic_no_cholesky",
+                objective=3,
+                lower_bound=3,
+            ),
+        ]
+    )
+    gehr = table.loc[table["transformation"] == "gdp.hull_exact"].iloc[0]
+    incomplete = table.loc[table["strategy"] == "incomplete"].iloc[0]
+    assert pd.isna(gehr["relaxation_matches_cehr"])
+    assert pd.isna(incomplete["root_gap"])
 
 
 def test_correctness_uses_relative_tolerance_with_absolute_near_zero():
@@ -81,13 +178,13 @@ def test_solver_groups_are_not_merged_and_unsolved_instances_remain_in_denominat
         record(run_id="b2", instance_id="i2", strategy="b", subsolver="gurobi", solver_time_sec=1),
         record(run_id="a3", instance_id="i3", strategy="a", subsolver="gurobi", status="timeout"),
         record(run_id="b3", instance_id="i3", strategy="b", subsolver="gurobi", status="timeout"),
-        record(run_id="a4", instance_id="i1", strategy="a", subsolver="baron", solver_time_sec=8),
-        record(run_id="b4", instance_id="i1", strategy="b", subsolver="baron", solver_time_sec=2),
+        record(run_id="a4", instance_id="i1", strategy="a", subsolver="scip", solver_time_sec=8),
+        record(run_id="b4", instance_id="i1", strategy="b", subsolver="scip", solver_time_sec=2),
     ]
     frames = performance_frames(records)
-    assert set(frames) == {("gams", "gurobi", None), ("gams", "baron", None)}
+    assert set(frames) == {("gams", "gurobi", None), ("gams", "scip", None)}
     assert frames[("gams", "gurobi", None)].shape == (3, 2)
-    assert frames[("gams", "baron", None)].shape == (3, 2)
+    assert frames[("gams", "scip", None)].shape == (3, 2)
     profile = dolan_more(frames[("gams", "gurobi", None)], np.array([100.0]))
     np.testing.assert_allclose(profile.iloc[0], [2 / 3, 2 / 3])
 
@@ -120,6 +217,7 @@ def test_manifest_keeps_missing_instances_and_skips_bad_and_foreign_records(tmp_
             "solver": "gams",
             "subsolver": "scip",
             "variant": None,
+            "mode": "solve",
         }
         for index in range(1, 6)
     ]
