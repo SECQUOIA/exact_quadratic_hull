@@ -1,2 +1,16 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+data/
+artifacts/
+results/
+*.pkl
+*.lst
+*.gms
+*.log
+!tests/fixtures/solver_logs/*.log
+.idea/
+.vscode/
 literature/
 reference_repositories/

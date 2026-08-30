@@ -1,0 +1,7 @@
+SCIP version 9.2.4
+LP0 (12r, 9c): opt. [1.750000e+00]
+SCIP Status        : problem is solved [optimal solution found]
+Primal Bound       : +2.50000000000000e+00
+Dual Bound         : +2.00000000000000e+00
+SOLVER STATUS      1 Normal Completion
+

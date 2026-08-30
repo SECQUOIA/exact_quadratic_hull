@@ -1,0 +1,44 @@
+[experiment]
+benchmark = "random_quadratic"
+base_seed = 20250602
+time_limit = 3600
+
+[instances]
+n_dimensions = [3, 4, 5, 6, 7]
+n_disjunctions = [3, 4, 5, 6, 7, 8, 9, 10]
+n_disjuncts_per_disjunction = [10, 11, 12, 13, 14, 15]
+n_constraints_per_disjunct = 10
+n_feasible_regions = 10
+ensure_positive_definite = true
+
+[[strategies]]
+name = "gdp.hull_exact_conic_no_cholesky"
+label = "CEHR-no-factorization"
+
+[[strategies]]
+name = "gdp.hull_exact_conic_original"
+label = "CEHR-only-factorized"
+
+[[strategies]]
+name = "gdp.hull_exact_conic_no_sqrt_no_extra_var"
+
+[[strategies]]
+name = "gdp.hull_exact_conic_no_sqrt_extra_var"
+
+[[strategies]]
+name = "gdp.hull_exact_conic_sqrt_no_extra_var"
+
+[[strategies]]
+name = "gdp.hull_exact_conic_sqrt_extra_var"
+
+[[solvers]]
+name = "gams"
+subsolver = "gurobi"
+
+[[solvers]]
+name = "gams"
+subsolver = "baron"
+
+[[solvers]]
+name = "gams"
+subsolver = "scip"

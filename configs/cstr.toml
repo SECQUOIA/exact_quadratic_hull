@@ -1,0 +1,37 @@
+[experiment]
+benchmark = "cstr"
+base_seed = 20250605
+time_limit = 3600
+
+[instances]
+NT = [2, 3, 4, 5, 6, 7, 8, 9, 10]
+
+[[strategies]]
+name = "gdp.hull"
+label = "hull"
+
+[[strategies]]
+name = "gdp.hull_exact"
+label = "GEHR"
+
+[[strategies]]
+name = "gdp.hull_exact_conic_no_cholesky"
+label = "CEHR"
+
+[[solvers]]
+name = "gams"
+subsolver = "gurobi"
+
+[[solvers]]
+name = "gams"
+subsolver = "baron"
+
+[[solvers]]
+name = "gams"
+subsolver = "scip"
+
+[[solvers]]
+name = "gams"
+subsolver = "scip"
+variant = "convex"
+

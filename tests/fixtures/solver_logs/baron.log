@@ -1,0 +1,8 @@
+BARON version 25.1.3
+===========================================================================
+  Iteration       Time (s)     Mem   Lower bound     Upper bound   Progress
+*         1           0.94    37MB     0.00000         3.66872        0.10%
+*         1           1.63    37MB     0.940000E-01    2.76765        0.10%
+Best possible = 2.77158991946373
+Solution      = 2.77158991946373  found at node 121207
+**** SOLVER STATUS      1 Normal Completion

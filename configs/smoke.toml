@@ -1,0 +1,21 @@
+[experiment]
+benchmark = "random_quadratic"
+base_seed = 7
+time_limit = 10
+
+[instances]
+n_dimensions = 2
+n_disjunctions = 1
+n_disjuncts_per_disjunction = 2
+n_constraints_per_disjunct = 1
+n_feasible_regions = 1
+ensure_positive_definite = true
+
+[[strategies]]
+name = "gdp.hull_exact"
+label = "GEHR-smoke"
+
+[[solvers]]
+name = "gams"
+subsolver = "scip"
+

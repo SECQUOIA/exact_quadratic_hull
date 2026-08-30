@@ -1,0 +1,44 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "exact-quadratic-hull"
+version = "0.1.0"
+description = "Exact quadratic hull reformulations and reproducible GDP benchmarks"
+readme = "README.md"
+license = {file = "LICENSE"}
+requires-python = ">=3.12"
+dependencies = [
+  "pyomo==6.10.0",
+  "numpy>=1.26",
+  "pandas>=2.2",
+  "matplotlib>=3.10",
+  "openpyxl>=3.1",
+  # Pyomo's logical_to_linear transformation imports SymPy for CSTR BooleanVars.
+  "sympy>=1.13",
+]
+
+[project.optional-dependencies]
+dev = ["pytest", "ruff"]
+
+[project.scripts]
+exact-hull = "exact_hull.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/exact_hull"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = ["gams: requires a GAMS installation"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.ruff.lint.per-file-ignores]
+"src/exact_hull/benchmarks/cstr.py" = ["E501"]
+"src/exact_hull/benchmarks/_vendor/cons_layout_model.py" = ["E501"]

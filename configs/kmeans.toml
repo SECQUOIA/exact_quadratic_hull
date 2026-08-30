@@ -1,0 +1,30 @@
+[experiment]
+benchmark = "kmeans"
+base_seed = 20250604
+time_limit = 3600
+
+[instances]
+n_dimensions = [2, 3, 4, 5]
+n_clusters = [3, 4, 5]
+n_points = [10, 11, 12, 13, 14, 15, 16, 17]
+
+[[strategies]]
+name = "gdp.hull"
+label = "hull"
+
+[[strategies]]
+name = "gdp.hull_exact"
+label = "GEHR"
+
+[[solvers]]
+name = "gams"
+subsolver = "gurobi"
+
+[[solvers]]
+name = "gams"
+subsolver = "baron"
+
+[[solvers]]
+name = "gams"
+subsolver = "scip"
+

@@ -1,0 +1,33 @@
+[experiment]
+benchmark = "clay"
+base_seed = 20250606
+time_limit = 3600
+
+[instances]
+instance = ["CLay0203", "CLay0204", "CLay0205", "CLay0303", "CLay0304", "CLay0305"]
+metric = ["l1", "l2"]
+
+[[strategies]]
+name = "gdp.hull"
+label = "hull"
+
+[[strategies]]
+name = "gdp.hull_exact"
+label = "GEHR"
+
+[[strategies]]
+name = "gdp.hull_exact_conic_no_cholesky"
+label = "CEHR"
+
+[[solvers]]
+name = "gams"
+subsolver = "gurobi"
+
+[[solvers]]
+name = "gams"
+subsolver = "baron"
+
+[[solvers]]
+name = "gams"
+subsolver = "scip"
+

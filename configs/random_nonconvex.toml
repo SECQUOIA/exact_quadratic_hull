@@ -1,0 +1,33 @@
+[experiment]
+benchmark = "random_quadratic"
+base_seed = 20250603
+time_limit = 3600
+
+[instances]
+n_dimensions = [2, 3, 4, 5]
+n_disjunctions = [1, 2, 3, 4, 5]
+n_disjuncts_per_disjunction = 3
+n_constraints_per_disjunct = [1, 2, 3, 4, 5]
+n_feasible_regions = 2
+ensure_positive_definite = false
+
+[[strategies]]
+name = "gdp.hull"
+label = "hull"
+
+[[strategies]]
+name = "gdp.hull_exact"
+label = "GEHR"
+
+[[solvers]]
+name = "gams"
+subsolver = "gurobi"
+
+[[solvers]]
+name = "gams"
+subsolver = "baron"
+
+[[solvers]]
+name = "gams"
+subsolver = "scip"
+
