@@ -7,6 +7,7 @@ import hashlib
 import io
 import json
 import math
+import multiprocessing
 import os
 import platform
 import re
@@ -16,6 +17,7 @@ import sys
 import tempfile
 import time
 import tomllib
+from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -120,6 +122,13 @@ class Job:
     variant: str | None
     mode: str
     time_limit: float
+
+
+@dataclass(frozen=True)
+class _ExecutionTask:
+    job: Job
+    output_directory: Path
+    versions: dict[str, str | None]
 
 
 def _validate_instance_config(benchmark: str, instances: Any) -> None:
@@ -448,7 +457,7 @@ def _environment_differences(existing: dict[str, Any], current: dict[str, str | 
     recorded = existing.get("versions", {})
     return [
         f"{name}: manifest={recorded.get(name)!r}, current={current.get(name)!r}"
-        for name in ("python", "pyomo", "gams")
+        for name in ("python", "pyomo", "gams", "git_sha")
         if recorded.get(name) != current.get(name)
     ]
 
@@ -1081,6 +1090,7 @@ def run_job(
         _attach_transform_counts(record, model, {})
         return record
     try:
+        shutil.rmtree(scratch, ignore_errors=True)
         scratch.mkdir(parents=True, exist_ok=True)
         solver = SolverFactory("gams")
         # keepfiles=True so Pyomo never tries to delete a primal GDX that GAMS did not
@@ -1200,18 +1210,19 @@ def run_job(
         return record
 
 
-def run(
+def _prepare_execution_tasks(
     config_path: Path,
     output_directory: Path,
-    limit=None,
-    resume=False,
+    limit: int | None,
+    resume: bool,
     rerun_statuses: set[str] | None = None,
     shard: tuple[int, int] | None = None,
     strict_env: bool = False,
-) -> list[RunRecord]:
+    versions: dict[str, str | None] | None = None,
+) -> list[_ExecutionTask]:
     config = load_config(config_path)
     planned_jobs = expand_jobs(config)
-    versions = _versions()
+    versions = _versions() if versions is None else versions
     _prepare_manifest(
         output_directory,
         build_manifest(config, planned_jobs, execution_limit=limit, versions=versions),
@@ -1223,7 +1234,7 @@ def run(
         shard_number, shard_count = shard
         jobs = [job for index, job in enumerate(jobs) if index % shard_count == shard_number - 1]
     jobs = jobs[:limit] if limit is not None else jobs
-    records = []
+    tasks = []
     for job in jobs:
         destination = output_directory / "jobs" / job.run_id / "result.json"
         if resume and destination.exists() and is_valid_result(
@@ -1232,7 +1243,130 @@ def run(
             existing_status = RunRecord.from_dict(json.loads(destination.read_text())).status
             if not rerun_statuses or existing_status not in rerun_statuses:
                 continue
-        record = run_job(job, output_directory, versions)
-        write_record_atomic(record, destination)
-        records.append(record)
+        tasks.append(_ExecutionTask(job, output_directory, versions))
+    return tasks
+
+
+def _parallel_phases(
+    tasks: list[_ExecutionTask],
+) -> tuple[list[_ExecutionTask], dict[tuple[Path, str], list[_ExecutionTask]]]:
+    phase_one = []
+    gated: dict[tuple[Path, str], list[_ExecutionTask]] = {}
+    mbigm_gates = set()
+    for task in tasks:
+        if task.job.strategy != "gdp.mbigm":
+            phase_one.append(task)
+            continue
+        key = (task.output_directory, task.job.instance_id)
+        if key not in mbigm_gates:
+            mbigm_gates.add(key)
+            phase_one.append(task)
+        else:
+            gated.setdefault(key, []).append(task)
+    return phase_one, gated
+
+
+def _run_job_worker(task: _ExecutionTask, concurrency: int) -> RunRecord:
+    record = run_job(task.job, task.output_directory, task.versions)
+    record.concurrency = concurrency
+    destination = task.output_directory / "jobs" / task.job.run_id / "result.json"
+    write_record_atomic(record, destination)
+    return record
+
+
+def _execute_tasks(tasks: list[_ExecutionTask], jobs: int) -> list[RunRecord]:
+    if jobs == 1:
+        return [_run_job_worker(task, jobs) for task in tasks]
+
+    phase_one, gated = _parallel_phases(tasks)
+    for name in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS"):
+        os.environ[name] = "1"
+    executor = ProcessPoolExecutor(
+        max_workers=jobs,
+        mp_context=multiprocessing.get_context("spawn"),
+    )
+    records = []
+    futures = {}
+    try:
+        for task in phase_one:
+            futures[executor.submit(_run_job_worker, task, jobs)] = task
+        while futures:
+            completed, _ = wait(futures, return_when=FIRST_COMPLETED)
+            for future in completed:
+                task = futures.pop(future)
+                records.append(future.result())
+                if task.job.strategy == "gdp.mbigm":
+                    key = (task.output_directory, task.job.instance_id)
+                    for gated_task in gated.pop(key, []):
+                        futures[executor.submit(_run_job_worker, gated_task, jobs)] = gated_task
+    except BaseException:
+        executor.shutdown(wait=False, cancel_futures=True)
+        raise
+    else:
+        executor.shutdown()
     return records
+
+
+def _validate_jobs(jobs: int) -> None:
+    if isinstance(jobs, bool) or not isinstance(jobs, int) or jobs <= 0:
+        raise ValueError("jobs must be a positive integer")
+
+
+def run(
+    config_path: Path,
+    output_directory: Path,
+    limit=None,
+    resume=False,
+    rerun_statuses: set[str] | None = None,
+    shard: tuple[int, int] | None = None,
+    strict_env: bool = False,
+    jobs: int = 1,
+) -> list[RunRecord]:
+    _validate_jobs(jobs)
+    tasks = _prepare_execution_tasks(
+        config_path,
+        output_directory,
+        limit,
+        resume,
+        rerun_statuses,
+        shard,
+        strict_env,
+    )
+    return _execute_tasks(tasks, jobs)
+
+
+def run_campaigns(
+    config_paths: list[Path],
+    output_root: Path,
+    *,
+    resume: bool = False,
+    rerun_statuses: set[str] | None = None,
+    strict_env: bool = False,
+    jobs: int = 1,
+) -> list[RunRecord]:
+    if len(config_paths) < 2:
+        raise ValueError("run_campaigns requires at least two config paths")
+    _validate_jobs(jobs)
+    stems = [path.stem for path in config_paths]
+    if any(stem in {".", ".."} for stem in stems):
+        raise ValueError("Config file stems '.' and '..' are not allowed")
+    if len(set(stems)) != len(stems):
+        raise ValueError("Config file stems must be unique")
+
+    versions = _versions()
+    tasks = []
+    for config_path in config_paths:
+        output_directory = output_root / config_path.stem
+        tasks.extend(
+            _prepare_execution_tasks(
+                config_path,
+                output_directory,
+                None,
+                resume,
+                rerun_statuses,
+                None,
+                strict_env,
+                versions,
+            )
+        )
+    return _execute_tasks(tasks, jobs)

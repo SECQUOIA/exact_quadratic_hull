@@ -92,11 +92,35 @@ def _record_for_job(job, **changes):
     return record
 
 
+def _write_build_failure_config(path, dimensions=(1, 2)):
+    path.write_text(
+        f"""
+[experiment]
+benchmark = "random_quadratic"
+time_limit = 1
+[instances]
+n_dimensions = {list(dimensions)}
+n_disjuncts_per_disjunction = 1
+n_feasible_regions = 2
+[[strategies]]
+name = "gdp.bigm"
+[[solvers]]
+subsolver = "scip"
+"""
+    )
+
+
 def test_atomic_record_round_trip(tmp_path):
     path = tmp_path / "jobs" / "run" / "result.json"
     write_record_atomic(_record(), path)
     assert is_valid_result(path, "run")
     assert not path.with_name(".result.json.tmp").exists()
+
+
+def test_run_record_without_concurrency_remains_loadable():
+    payload = asdict(_record())
+    payload.pop("concurrency")
+    assert RunRecord.from_dict(payload).concurrency is None
 
 
 def test_resume_skips_existing_result(tmp_path, monkeypatch):
@@ -124,6 +148,39 @@ def test_build_failure_returns_one_diagnostic_record(tmp_path, monkeypatch):
     record = runner.run_job(_job(), tmp_path, versions={})
     assert record.status == "build_error"
     assert "forced build failure" in record.error
+
+
+def test_run_job_removes_stale_scratch_before_solver(tmp_path, monkeypatch):
+    class TinyBenchmark:
+        @staticmethod
+        def build(case):
+            model = ConcreteModel()
+            model.x = Var()
+            model.objective = Objective(expr=model.x)
+            return model
+
+    job = _job()
+    stale = tmp_path / "jobs" / job.run_id / "scratch" / "stale.txt"
+    stale.parent.mkdir(parents=True)
+    stale.write_text("left over")
+
+    def transform(model, *args, **kwargs):
+        return {}, [model.x], [], []
+
+    class InspectingSolver:
+        @staticmethod
+        def solve(*args, **kwargs):
+            assert not stale.exists()
+            raise RuntimeError("stop after scratch inspection")
+
+    monkeypatch.setitem(runner.BENCHMARKS, "kmeans", TinyBenchmark())
+    monkeypatch.setattr(runner, "transform_model", transform)
+    monkeypatch.setattr(runner, "SolverFactory", lambda name: InspectingSolver())
+
+    record = runner.run_job(job, tmp_path, versions={})
+
+    assert record.status == "solver_error"
+    assert not stale.exists()
 
 
 def test_solver_failure_returns_one_diagnostic_record(tmp_path, monkeypatch):
@@ -647,6 +704,116 @@ subsolver = "scip"
     _, persisted = read_campaign(tmp_path / "run")
     assert len(records) == len(persisted) == 3
     assert [record.status for record in persisted].count("solver_error") == 1
+    assert all(record.concurrency == 1 for record in persisted)
+
+
+def test_process_pool_persists_build_failures_with_concurrency(tmp_path):
+    config = tmp_path / "pool.toml"
+    _write_build_failure_config(config)
+
+    records = runner.run(config, tmp_path / "run", jobs=2)
+
+    planned = runner.expand_jobs(runner.load_config(config))
+    assert len(records) == len(planned) == 2
+    for job in planned:
+        destination = tmp_path / "run" / "jobs" / job.run_id / "result.json"
+        assert is_valid_result(destination, job.run_id, asdict(job))
+        record = RunRecord.from_dict(json.loads(destination.read_text()))
+        assert record.status == "build_error"
+        assert record.concurrency == 2
+
+
+def test_process_pool_releases_gated_mbigm_sibling(tmp_path):
+    config = tmp_path / "gated.toml"
+    config.write_text(
+        """
+[experiment]
+benchmark = "random_quadratic"
+time_limit = 1
+[instances]
+n_dimensions = 1
+n_disjuncts_per_disjunction = 1
+n_feasible_regions = 2
+[[strategies]]
+name = "gdp.mbigm"
+[[solvers]]
+subsolver = "scip"
+[[solvers]]
+subsolver = "gurobi"
+"""
+    )
+
+    records = runner.run(config, tmp_path / "run", jobs=2)
+
+    planned = runner.expand_jobs(runner.load_config(config))
+    assert len(records) == len(planned) == 2
+    for job in planned:
+        destination = tmp_path / "run" / "jobs" / job.run_id / "result.json"
+        assert is_valid_result(destination, job.run_id, asdict(job))
+        assert RunRecord.from_dict(json.loads(destination.read_text())).concurrency == 2
+
+
+def test_multiple_configs_share_pool_and_resume_per_stem(tmp_path):
+    first = tmp_path / "first.toml"
+    second = tmp_path / "second.toml"
+    _write_build_failure_config(first, dimensions=(1,))
+    _write_build_failure_config(second, dimensions=(2,))
+    root = tmp_path / "campaigns"
+
+    records = runner.run_campaigns([first, second], root, jobs=2)
+
+    assert len(records) == 2
+    timestamps = {}
+    for config in (first, second):
+        campaign = root / config.stem
+        manifest, persisted = read_campaign(campaign)
+        assert len(manifest["planned_jobs"]) == len(persisted) == 1
+        assert persisted[0].concurrency == 2
+        destination = campaign / "jobs" / persisted[0].run_id / "result.json"
+        timestamps[destination] = destination.stat().st_mtime_ns
+
+    assert runner.run_campaigns([first, second], root, resume=True, jobs=2) == []
+    assert {path: path.stat().st_mtime_ns for path in timestamps} == timestamps
+
+
+def test_run_campaigns_requires_multiple_configs(tmp_path):
+    for config_paths in ([], [tmp_path / "only.toml"]):
+        with pytest.raises(ValueError, match="at least two config paths"):
+            runner.run_campaigns(config_paths, tmp_path / "campaigns")
+
+
+def test_parallel_phases_gate_mbigm_per_campaign_and_instance(tmp_path):
+    versions = {}
+    first_directory = tmp_path / "first"
+    second_directory = tmp_path / "second"
+    first_gate = runner._ExecutionTask(
+        replace(_job("first-gate"), strategy="gdp.mbigm", instance_id="shared"),
+        first_directory,
+        versions,
+    )
+    first_gated = runner._ExecutionTask(
+        replace(_job("first-gated"), strategy="gdp.mbigm", instance_id="shared"),
+        first_directory,
+        versions,
+    )
+    second_gate = runner._ExecutionTask(
+        replace(_job("second-gate"), strategy="gdp.mbigm", instance_id="shared"),
+        second_directory,
+        versions,
+    )
+    other_instance = runner._ExecutionTask(
+        replace(_job("other-instance"), strategy="gdp.mbigm", instance_id="other"),
+        first_directory,
+        versions,
+    )
+    non_mbigm = runner._ExecutionTask(_job("non-mbigm"), first_directory, versions)
+
+    phase_one, gated = runner._parallel_phases(
+        [first_gate, non_mbigm, first_gated, second_gate, other_instance]
+    )
+
+    assert phase_one == [first_gate, non_mbigm, second_gate, other_instance]
+    assert gated == {(first_directory, "shared"): [first_gated]}
 
 
 @pytest.mark.parametrize(
@@ -731,6 +898,30 @@ def test_strict_resume_environment_mismatch_is_an_error(tmp_path):
     runner._prepare_manifest(tmp_path, manifest, resume=False)
     current = runner.build_manifest(config, jobs, versions={"python": "new"})
     with pytest.raises(ValueError, match="Resume environment differs"):
+        runner._prepare_manifest(tmp_path, current, resume=True, strict_env=True)
+
+
+def test_git_sha_resume_drift_warns_and_is_strictly_rejected(tmp_path, capsys):
+    config = runner.load_config(Path(__file__).parents[1] / "configs" / "smoke.toml")
+    jobs = runner.expand_jobs(config)
+    recorded_versions = {
+        "python": "same",
+        "pyomo": "same",
+        "gams": None,
+        "solver": None,
+        "git_sha": "old",
+    }
+    current_versions = {**recorded_versions, "git_sha": "new"}
+    runner._prepare_manifest(
+        tmp_path,
+        runner.build_manifest(config, jobs, versions=recorded_versions),
+        resume=False,
+    )
+    current = runner.build_manifest(config, jobs, versions=current_versions)
+
+    runner._prepare_manifest(tmp_path, current, resume=True)
+    assert "git_sha: manifest='old', current='new'" in capsys.readouterr().err
+    with pytest.raises(ValueError, match="git_sha"):
         runner._prepare_manifest(tmp_path, current, resume=True, strict_env=True)
 
 
@@ -944,6 +1135,55 @@ def test_negative_limit_is_rejected_by_argparse(tmp_path):
     with pytest.raises(SystemExit) as error:
         main(["run", str(config), "--dry-run", "--limit", "-1"])
     assert error.value.code == 2
+
+
+def test_nonpositive_jobs_is_rejected_by_argparse(tmp_path):
+    config = Path(__file__).parents[1] / "configs" / "smoke.toml"
+    with pytest.raises(SystemExit) as error:
+        main(["run", str(config), "--dry-run", "--jobs", "0"])
+    assert error.value.code == 2
+
+
+@pytest.mark.parametrize("option", ["--limit", "--shard"])
+def test_multi_config_rejects_single_campaign_selection_options(tmp_path, option):
+    first = tmp_path / "first.toml"
+    second = tmp_path / "second.toml"
+    arguments = ["run", str(first), str(second), "--dry-run", option]
+    arguments.append("1" if option == "--limit" else "1/2")
+    with pytest.raises(SystemExit) as error:
+        main(arguments)
+    assert error.value.code == 2
+
+
+def test_multi_config_rejects_duplicate_stems(tmp_path):
+    first = tmp_path / "first" / "same.toml"
+    second = tmp_path / "second" / "same.toml"
+    with pytest.raises(SystemExit) as error:
+        main(["run", str(first), str(second), "--dry-run"])
+    assert error.value.code == 2
+
+
+@pytest.mark.parametrize("unsafe_name", ["..toml", "...toml"])
+def test_multi_config_rejects_dot_stems(tmp_path, unsafe_name):
+    unsafe = tmp_path / unsafe_name
+    safe = tmp_path / "safe.toml"
+    with pytest.raises(SystemExit) as error:
+        main(["run", str(unsafe), str(safe), "--dry-run"])
+    assert error.value.code == 2
+
+
+def test_multi_config_dry_run_prints_each_campaign(tmp_path, capsys):
+    first = tmp_path / "first.toml"
+    second = tmp_path / "second.toml"
+    _write_build_failure_config(first, dimensions=(1,))
+    _write_build_failure_config(second, dimensions=(2,))
+
+    assert main(["run", str(first), str(second), "--dry-run"]) == 0
+
+    output = capsys.readouterr().out
+    assert "campaign: first" in output
+    assert "campaign: second" in output
+    assert output.count("planned jobs: 1") == 2
 
 
 @pytest.mark.parametrize("command", ["verify", "report", "reference", "plot"])

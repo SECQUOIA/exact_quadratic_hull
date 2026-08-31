@@ -23,7 +23,7 @@ from pyomo.opt import SolverStatus
 
 from exact_hull.analysis.tables import bounds, censoring, methods, summary
 from exact_hull.experiment.results import RUN_STATUSES, aggregate, read_campaign
-from exact_hull.experiment.runner import expand_jobs, load_config, run
+from exact_hull.experiment.runner import expand_jobs, load_config, run, run_campaigns
 from exact_hull.transformations import TRANSFORMATIONS
 
 
@@ -31,6 +31,13 @@ def _nonnegative_int(value: str) -> int:
     parsed = int(value)
     if parsed < 0:
         raise argparse.ArgumentTypeError("must be a nonnegative integer")
+    return parsed
+
+
+def _positive_int(value: str) -> int:
+    parsed = int(value)
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError("must be a positive integer")
     return parsed
 
 
@@ -71,8 +78,9 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="exact-hull")
     subparsers = parser.add_subparsers(dest="command", required=True)
     run_parser = subparsers.add_parser("run", help="run or inspect an experiment")
-    run_parser.add_argument("config", type=Path)
+    run_parser.add_argument("config", type=Path, nargs="+")
     run_parser.add_argument("--out", type=Path, default=Path("results"))
+    run_parser.add_argument("--jobs", type=_positive_int, default=1)
     run_parser.add_argument("--limit", type=_nonnegative_int)
     run_parser.add_argument("--dry-run", action="store_true")
     run_parser.add_argument("--resume", type=Path)
@@ -169,38 +177,68 @@ def main(argv: list[str] | None = None) -> int:
             parser.error("--rerun-status requires --resume")
         if args.strict_env and args.resume is None:
             parser.error("--strict-env requires --resume")
-        config = load_config(args.config.resolve())
-        jobs = expand_jobs(config)
-        if args.shard is not None:
-            selected, total = args.shard
-            jobs = [job for index, job in enumerate(jobs) if index % total == selected - 1]
-        if args.limit is not None:
-            jobs = jobs[: args.limit]
-        instance_count = len({job.instance_id for job in jobs})
-        strategy_count = len({(job.strategy, job.label) for job in jobs})
-        solver_count = len({(job.solver, job.subsolver, job.variant) for job in jobs})
-        mode_count = len({job.mode for job in jobs})
-        print(
-            f"planned jobs: {len(jobs)}; instances: {instance_count}; "
-            f"strategies: {strategy_count}; solvers: {solver_count}; modes: {mode_count}"
-        )
-        for job in jobs:
-            print(
-                f"{job.run_id} {job.benchmark} {job.instance_id} "
-                f"{job.label} {job.solver}/{job.subsolver} {job.mode}"
+        config_paths = [path.resolve() for path in args.config]
+        if len(config_paths) > 1 and args.limit is not None:
+            parser.error("--limit cannot be used with multiple configs")
+        if len(config_paths) > 1 and args.shard is not None:
+            parser.error("--shard cannot be used with multiple configs")
+        stems = [path.stem for path in config_paths]
+        if len(config_paths) > 1 and any(stem in {".", ".."} for stem in stems):
+            parser.error("config file stems '.' and '..' are not allowed")
+        if len(set(stems)) != len(stems):
+            parser.error("config file stems must be unique")
+        for config_path in config_paths:
+            config = load_config(config_path)
+            planned_jobs = expand_jobs(config)
+            if args.shard is not None:
+                selected, total = args.shard
+                planned_jobs = [
+                    job
+                    for index, job in enumerate(planned_jobs)
+                    if index % total == selected - 1
+                ]
+            if args.limit is not None:
+                planned_jobs = planned_jobs[: args.limit]
+            if len(config_paths) > 1:
+                print(f"campaign: {config_path.stem}")
+            instance_count = len({job.instance_id for job in planned_jobs})
+            strategy_count = len({(job.strategy, job.label) for job in planned_jobs})
+            solver_count = len(
+                {(job.solver, job.subsolver, job.variant) for job in planned_jobs}
             )
+            mode_count = len({job.mode for job in planned_jobs})
+            print(
+                f"planned jobs: {len(planned_jobs)}; instances: {instance_count}; "
+                f"strategies: {strategy_count}; solvers: {solver_count}; modes: {mode_count}"
+            )
+            for job in planned_jobs:
+                print(
+                    f"{job.run_id} {job.benchmark} {job.instance_id} "
+                    f"{job.label} {job.solver}/{job.subsolver} {job.mode}"
+                )
         if args.dry_run:
             return 0
         destination = args.resume.resolve() if args.resume else args.out.resolve()
-        run(
-            args.config.resolve(),
-            destination,
-            args.limit,
-            resume=args.resume is not None,
-            rerun_statuses=args.rerun_status,
-            shard=args.shard,
-            strict_env=args.strict_env,
-        )
+        if len(config_paths) == 1:
+            run(
+                config_paths[0],
+                destination,
+                args.limit,
+                resume=args.resume is not None,
+                rerun_statuses=args.rerun_status,
+                shard=args.shard,
+                strict_env=args.strict_env,
+                jobs=args.jobs,
+            )
+        else:
+            run_campaigns(
+                config_paths,
+                destination,
+                resume=args.resume is not None,
+                rerun_statuses=args.rerun_status,
+                strict_env=args.strict_env,
+                jobs=args.jobs,
+            )
         return 0
     if args.command == "report":
         run_directory = args.rundir.resolve()

@@ -8,6 +8,7 @@ Each planned job writes `jobs/<run_id>/result.json` atomically. A failure still 
 | `benchmark`, `instance_id`, `instance_params`, `seed` | Instance inputs; the ID is a family prefix plus twelve content-hash hex digits; generation rejects a truncated-hash collision |
 | `strategy`, `transformation`, `transformation_options` | Display label, registered Pyomo transformation name, and explicit options |
 | `solver`, `subsolver`, `variant`, `mode`, `time_limit` | GAMS interface, selected solver, solver option variant, job mode, and mode-specific limit |
+| `concurrency` | Effective `--jobs` value for the invocation that produced the record; null in older records |
 | `duration_sec` | Wall-clock duration for the complete job, including model construction, transformation, solve, and result extraction |
 | `solver_time_sec` | GAMS `ETSOLVE` reported by Pyomo as solver user time; performance profiles use this field |
 | `transform_sec` | Wall time for logical and GDP transformations, structural counting, and mode relaxation |

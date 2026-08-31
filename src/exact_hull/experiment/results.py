@@ -61,6 +61,7 @@ class RunRecord:
     duration_sec: float | None
     solver_time_sec: float | None
     status: RunStatus
+    concurrency: int | None = None
     transform_sec: float | None = None
     objective: float | None = None
     lower_bound: float | None = None
@@ -137,6 +138,12 @@ class RunRecord:
                 raise TypeError(f"Run record {name} must be an object")
         if isinstance(record.seed, bool) or not isinstance(record.seed, int):
             raise TypeError("Run record seed must be an integer")
+        if record.concurrency is not None and (
+            isinstance(record.concurrency, bool)
+            or not isinstance(record.concurrency, int)
+            or record.concurrency <= 0
+        ):
+            raise TypeError("Run record concurrency must be a positive integer or null")
         _validate_number("time_limit", record.time_limit, optional=False, nonnegative=True)
         for name in (
             "duration_sec",

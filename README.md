@@ -28,16 +28,22 @@ exact-hull run configs/smoke.toml --dry-run
 Run it on a machine with GAMS and SCIP:
 
 ```console
-exact-hull run configs/smoke.toml --out results/smoke
+exact-hull run configs/smoke.toml --out results/smoke --jobs 2
 exact-hull report results/smoke
 exact-hull plot results/smoke
 exact-hull verify results/smoke
 ```
 
-Every solver job builds a fresh model and writes one atomic JSON result. Re-run an interrupted campaign with `--resume`:
+Every solver job builds a fresh model and writes one atomic JSON result. `--resume` creates or continues a campaign, so it can be used from the first idempotent invocation:
 
 ```console
-exact-hull run configs/random_psd.toml --resume results/random-psd
+exact-hull run configs/random_psd.toml --resume results/random-psd --jobs 8
+```
+
+Run several configs through one worker pool by giving an output root; each campaign is stored under its config-file stem:
+
+```console
+exact-hull run configs/random_psd.toml configs/kmeans.toml --out results --jobs 8
 ```
 
 Use `exact-hull inspect CONFIG` for transformation/presolve instrumentation, `exact-hull reference RUN_DIR` for certified objectives, and `exact-hull conic-bound CONFIG` for the independent CEHR relaxation oracle.

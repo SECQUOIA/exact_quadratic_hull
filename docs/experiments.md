@@ -1,6 +1,6 @@
 # Experiments
 
-Use `exact-hull run CONFIG --dry-run` to inspect a campaign. Remove `--dry-run` and set `--out DIR` on a configured GAMS machine. Use `exact-hull report DIR --xlsx` for a workbook or omit `--xlsx` for CSV. `exact-hull plot DIR --mode solve|root|relaxation --tolerance 1e-5` incrementally refreshes `verification.csv` at the requested tolerance before writing stable-style profiles; solve is the default.
+Use `exact-hull run CONFIG --dry-run` to inspect a campaign. Remove `--dry-run` and set `--out DIR` on a configured GAMS machine. Add `--jobs N` to run up to N solver jobs in parallel processes. Use `exact-hull report DIR --xlsx` for a workbook or omit `--xlsx` for CSV. `exact-hull plot DIR --mode solve|root|relaxation --tolerance 1e-5` incrementally refreshes `verification.csv` at the requested tolerance before writing stable-style profiles; solve is the default.
 
 | Config | Instances | Jobs |
 | --- | ---: | ---: |
@@ -34,18 +34,28 @@ SCIP `variant="convex"` records are diagnostics. GEHR and binary multiplication 
 
 BARON was removed after the MPC review because of inconsistent optimality certificates on convex instances, heavy time-limit censoring, and the Gurobi license clause on comparisons with commercial solvers; the last revision with BARON support is commit d071e3b.
 
-At campaign start, the runner atomically creates `manifest.json` with the normalized config, full plan, and Python/Pyomo/GAMS/Git provenance. Concurrent identical creation is tolerated. Resume warns on Python, Pyomo, or GAMS drift; `--strict-env` makes drift an error. A non-empty directory is otherwise accepted only with `--resume` and an exactly matching manifest.
+At campaign start, the runner atomically creates `manifest.json` with the normalized config, full plan, and Python/Pyomo/GAMS/Git provenance. Concurrent identical creation is tolerated. Resume warns on Python, Pyomo, GAMS, or Git-revision drift; `--strict-env` makes drift an error. Git drift compares HEAD commits only, so uncommitted edits are not detected; under `--strict-env`, any new commit between resume invocations is an error. A non-empty directory is otherwise accepted only with `--resume` and an exactly matching manifest.
 
-Any config edit, including a label-only change or reordering strategies or solvers, requires a fresh output directory by design. `--limit` restricts only the jobs executed by that invocation; the manifest always records the complete campaign so a later unrestricted `--resume` can finish it.
+Any config edit, including a label-only change or reordering strategies or solvers, requires a fresh output directory by design. `--resume RUN_DIR` means create or continue: using it on the first invocation makes the command idempotent. Under resume, `--limit N` means consider only the first N planned jobs, not run N additional jobs. The manifest always records the complete campaign so a later unrestricted `--resume` can finish it.
 
-Use `--rerun-status solver_error,timeout` with `--resume` to retry selected valid results. For N-way execution, start shard 1 first, then point every process at the same directory:
+Several configs can share one worker pool. The output or resume path is then a root, and each campaign uses a directory named for its config-file stem:
 
 ```console
-exact-hull run CONFIG --out RUN_DIR --shard 1/N
-exact-hull run CONFIG --resume RUN_DIR --shard 2/N
+exact-hull run configs/random_psd.toml configs/kmeans.toml --out results --jobs 8
+```
+
+This writes `results/random_psd` and `results/kmeans`. Config stems must be unique, and `--limit` and `--shard` are unavailable in a multi-config invocation. Pass a per-stem campaign directory, such as `results/random_psd`, rather than the multi-config root to `report`, `plot`, `verify`, and `reference`.
+
+Use `--rerun-status solver_error,timeout` with `--resume` to retry selected valid results. `--shard` remains available for multi-machine campaigns and composes with per-machine `--jobs`. For N-way execution, start shard 1 first, then point every process at the same directory:
+
+```console
+exact-hull run CONFIG --out RUN_DIR --shard 1/N --jobs J
+exact-hull run CONFIG --resume RUN_DIR --shard 2/N --jobs J
 ```
 
 Continue through shard N. Selection uses the full-plan zero-based index modulo N; `--limit` applies within a shard. Per-run scratch and result paths prevent collisions.
+
+Choose `--jobs` with timing fidelity in mind. Recorded solve times and time limits are wall-clock, so CPU or memory contention inflates timings and increases timeout censoring. Stay at or below the physical core count with RAM headroom. Before a full campaign, compare `configs/qualification.toml` at `--jobs 1` and at the target level, then join the two `results.csv` files on `run_id` to check the timing effect.
 
 ## Instrumentation and certification
 
