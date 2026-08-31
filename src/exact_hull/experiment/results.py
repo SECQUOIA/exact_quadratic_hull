@@ -88,6 +88,8 @@ class RunRecord:
     n_disaggregated_vars: int | None = None
     n_nonlinear_constraints: int | None = None
     m_estimation_time_sec: float | None = None
+    m_estimation_time_total_sec: float | None = None
+    m_estimation_cache_hit: bool | None = None
     m_estimation_subsolves: int | None = None
     solver_status: str | None = None
     termination: str | None = None
@@ -126,6 +128,10 @@ class RunRecord:
             value = getattr(record, name)
             if value is not None and not isinstance(value, str):
                 raise TypeError(f"Run record {name} must be a string or null")
+        if record.m_estimation_cache_hit is not None and not isinstance(
+            record.m_estimation_cache_hit, bool
+        ):
+            raise TypeError("Run record m_estimation_cache_hit must be a boolean or null")
         for name in ("instance_params", "transformation_options", "solution", "versions"):
             if not isinstance(getattr(record, name), dict):
                 raise TypeError(f"Run record {name} must be an object")
@@ -137,6 +143,7 @@ class RunRecord:
             "solver_time_sec",
             "transform_sec",
             "m_estimation_time_sec",
+            "m_estimation_time_total_sec",
             "abs_gap",
             "rel_gap",
         ):
@@ -333,19 +340,22 @@ def aggregate(
         correctness,
         ground_truth_with_sources,
         invalid_certificate,
+        negative_control,
         reference_values,
     )
 
     if records is None:
         _, records = read_campaign(run_directory)
-    truth, truth_sources = ground_truth_with_sources(records, references)
+    truth, truth_sources = ground_truth_with_sources(
+        records, references, verification=verification
+    )
     certified_truth = reference_values(references)
     rows = []
     for record in records:
         row = asdict(record)
         row["ground_truth"] = truth.get(record.instance_id)
         row["correct"] = (
-            correctness(record, truth, verification)
+            correctness(record, truth, verification, truth_sources)
             if record.mode == "solve"
             else None
         )
@@ -356,7 +366,7 @@ def aggregate(
         row["invalid_certificate"] = invalid_certificate(
             record, reference_truth=certified_truth
         )
-        row["negative_control"] = record.variant == "convex"
+        row["negative_control"] = negative_control(record)
         for field_name in ("instance_params", "transformation_options", "solution", "versions"):
             row[field_name] = json.dumps(row[field_name], sort_keys=True)
         rows.append(row)

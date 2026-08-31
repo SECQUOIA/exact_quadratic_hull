@@ -240,11 +240,11 @@ def main(argv: list[str] | None = None) -> int:
         ).to_csv(methods_path, index=False)
         print(methods_path)
         bounds_path = run_directory / "bounds.csv"
-        bounds_frame = bounds(records, references=references)
+        bounds_frame = bounds(records, references=references, verification=verification)
         bounds_frame.to_csv(bounds_path, index=False)
         print(bounds_path)
         censoring_path = run_directory / "censoring.csv"
-        censoring(records, references).to_csv(censoring_path, index=False)
+        censoring(records, references, verification).to_csv(censoring_path, index=False)
         print(censoring_path)
         mismatches = bounds_frame.loc[
             bounds_frame["relaxation_matches_cehr"].eq(False), "instance_id"

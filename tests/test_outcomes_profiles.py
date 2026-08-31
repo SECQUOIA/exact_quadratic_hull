@@ -4,7 +4,13 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from exact_hull.analysis.outcomes import correctness, ground_truth, invalid_certificate, is_correct
+from exact_hull.analysis.outcomes import (
+    correctness,
+    ground_truth,
+    ground_truth_with_sources,
+    invalid_certificate,
+    is_correct,
+)
 from exact_hull.analysis.plots import performance_frames, style_map
 from exact_hull.analysis.profiles import dolan_more, shifted_geometric_mean
 from exact_hull.analysis.tables import bounds, censoring, methods, summary
@@ -40,24 +46,28 @@ def record(**changes):
 
 
 def test_timed_out_low_objective_cannot_poison_ground_truth():
-    truth = ground_truth(
-        [
-            record(run_id="good", objective=5),
-            record(run_id="bad", status="timeout", objective=-99),
-            record(run_id="local", status="locally_optimal", objective=-100),
-        ]
-    )
+    records = [
+        record(run_id="good", objective=5),
+        record(run_id="bad", status="timeout", objective=-99),
+        record(run_id="local", status="locally_optimal", objective=-100),
+    ]
+    truth = ground_truth(records, verification={"good": "verified_feasible"})
     assert truth == {"i": 5}
 
 
 def test_convex_variant_is_excluded_from_population_ground_truth():
-    assert ground_truth([record(variant="convex", objective=-10), record(objective=5)]) == {
-        "i": 5
-    }
+    records = [record(run_id="convex", variant="convex", objective=-10), record(objective=5)]
+    assert ground_truth(
+        records,
+        verification={"convex": "verified_feasible", "r": "verified_feasible"},
+    ) == {"i": 5}
 
 
 def test_nonfinite_objective_cannot_be_ground_truth():
-    assert ground_truth([record(objective=float("nan")), record(objective=float("inf"))]) == {}
+    assert ground_truth(
+        [record(objective=float("nan")), record(objective=float("inf"))],
+        verification={"r": "verified_feasible"},
+    ) == {}
 
 
 def test_non_solve_modes_are_excluded_from_ground_truth_summary_and_profiles():
@@ -66,7 +76,7 @@ def test_non_solve_modes_are_excluded_from_ground_truth_summary_and_profiles():
         record(run_id="root", mode="root", objective=-10, solver_time_sec=0.1),
         record(run_id="relax", mode="relaxation", objective=-20, solver_time_sec=0.1),
     ]
-    assert ground_truth(records) == {"i": 5}
+    assert ground_truth(records, verification={"solve": "verified_feasible"}) == {"i": 5}
     assert summary(records)["jobs"].sum() == 1
     references = {"i": {"status": "certified", "objective": 5}}
     frame = performance_frames(
@@ -94,7 +104,8 @@ def test_bounds_combines_modes_and_checks_gehr_cehr_relaxations():
             lower_bound=3,
         ),
     ]
-    table = bounds(records)
+    verification = {record.run_id: "verified_feasible" for record in records}
+    table = bounds(records, verification=verification)
     gehr = table.loc[table["transformation"] == "gdp.hull_exact"].iloc[0]
     assert gehr["ground_truth"] == 5
     assert gehr["root_bound"] == 4
@@ -171,10 +182,26 @@ def test_feasible_root_bound_is_retained_and_censoring_reasons_are_reported():
             lower_bound=2,
         ),
     ]
-    assert bounds(records).iloc[0]["root_gap"] == pytest.approx(0.2)
+    verification = {record.run_id: "verified_feasible" for record in records}
+    assert bounds(records, verification=verification).iloc[0]["root_gap"] == pytest.approx(0.2)
     excluded = censoring(records)
     assert excluded.iloc[0]["reason"] == "unacceptable_status"
     assert excluded.iloc[0]["excluded"] == 1
+
+
+def test_censoring_reports_bound_above_verified_population_truth():
+    records = [
+        record(run_id="solve", objective=5),
+        record(
+            run_id="root",
+            mode="root",
+            status="node_limit",
+            objective=None,
+            lower_bound=6,
+        ),
+    ]
+    table = censoring(records, verification={"solve": "verified_feasible"})
+    assert table.iloc[0]["reason"] == "dual_bound_exceeds_reference"
 
 
 def test_reference_invalid_certificate_and_root_gap_closed():
@@ -261,6 +288,34 @@ def test_methods_preserves_unobserved_plan_and_unknown_references():
     assert pd.isna(missing["shifted_geometric_mean_10_sec"])
 
 
+def test_methods_counts_mbigm_estimation_once_per_instance():
+    records = [
+        record(
+            run_id="first",
+            instance_id="i1",
+            transformation="gdp.mbigm",
+            m_estimation_time_total_sec=3,
+            m_estimation_cache_hit=False,
+        ),
+        record(
+            run_id="repeat",
+            instance_id="i1",
+            transformation="gdp.mbigm",
+            m_estimation_time_total_sec=3,
+            m_estimation_cache_hit=True,
+        ),
+        record(
+            run_id="second-instance",
+            instance_id="i2",
+            transformation="gdp.mbigm",
+            m_estimation_time_total_sec=4,
+            m_estimation_cache_hit=False,
+        ),
+    ]
+    table = methods(records)
+    assert table["m_estimation_time_total_sec"].iloc[0] == 7
+
+
 def test_solver_groups_are_not_merged_and_unsolved_instances_remain_in_denominator():
     records = [
         record(run_id="a1", instance_id="i1", strategy="a", subsolver="gurobi", solver_time_sec=1),
@@ -317,7 +372,25 @@ def test_population_fallback_truth_is_used_and_labeled_per_instance():
     frames = performance_frames(
         records, references=references, verification=verification
     )[("gams", "scip", None)]
-    assert frames.at["fallback", "s"] == 1
+    assert np.isnan(frames.at["fallback", "s"])
+
+
+def test_population_fallback_requires_verified_feasible_sources_and_only_refutes():
+    records = [
+        record(run_id="source", objective=5),
+        record(run_id="wrong", objective=6),
+        record(run_id="unverified-better", objective=1),
+    ]
+    verification = {
+        "source": "verified_feasible",
+        "wrong": "verified_feasible",
+        "unverified-better": "not_verifiable",
+    }
+    truth, sources = ground_truth_with_sources(records, verification=verification)
+    assert truth == {"i": 5}
+    assert sources == {"i": "population-fallback"}
+    assert correctness(records[0], truth, verification, sources) is None
+    assert correctness(records[1], truth, verification, sources) is False
 
 
 def test_methods_labels_certified_truth_without_planned_jobs():
@@ -331,7 +404,41 @@ def test_methods_labels_certified_truth_without_planned_jobs():
 
 
 def test_missing_verification_is_unknown_not_wrong():
-    assert correctness(record(), {"i": 5}, {}) is None
+    assert correctness(record(), {"i": 5}, {}, {"i": "reference"}) is None
+
+
+def test_truth_provenance_arguments_are_required():
+    with pytest.raises(TypeError):
+        ground_truth([record()])
+    with pytest.raises(TypeError):
+        ground_truth_with_sources([record()])
+    with pytest.raises(TypeError):
+        correctness(record(), {"i": 5}, {})
+
+
+def test_negative_control_is_limited_to_nonconvex_defining_functions():
+    transformations = {
+        "bigm": "gdp.bigm",
+        "binmult": "gdp.binary_multiplication",
+        "hull": "gdp.hull",
+        "GEHR": "gdp.hull_exact",
+        "CEHR": "gdp.hull_exact_conic_no_cholesky",
+    }
+    records = [
+        record(
+            run_id=label,
+            strategy=label,
+            transformation=transformation,
+            variant="convex",
+        )
+        for label, transformation in transformations.items()
+    ]
+    table = bounds(records)
+    labeled = dict(zip(table["strategy"], table["negative_control"], strict=True))
+    assert {label for label, is_negative in labeled.items() if is_negative} == {
+        "binmult",
+        "GEHR",
+    }
 
 
 def test_root_gap_closed_rejects_near_zero_denominator():

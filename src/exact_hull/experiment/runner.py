@@ -70,9 +70,11 @@ INSTANCE_DEFAULTS = {
         "n_constraints_per_disjunct": 2,
         "n_feasible_regions": 2,
         "ensure_positive_definite": False,
+        "objective_positive_definite": None,
+        "replicate": 1,
         "sparsity_factor": 0.0,
     },
-    "kmeans": {},
+    "kmeans": {"replicate": 1},
     "cstr": {"NT": 5},
     "clay": {"instance": "CLay0203", "metric": "l1"},
 }
@@ -83,12 +85,16 @@ INT_PARAMETERS = {
         "n_disjuncts_per_disjunction",
         "n_constraints_per_disjunct",
         "n_feasible_regions",
+        "replicate",
     },
-    "kmeans": {"n_dimensions", "n_clusters", "n_points"},
+    "kmeans": {"n_dimensions", "n_clusters", "n_points", "replicate"},
     "cstr": {"NT"},
     "clay": set(),
 }
 FLOAT_PARAMETERS = {"random_quadratic": {"sparsity_factor"}}
+BOOL_PARAMETERS = {
+    "random_quadratic": {"ensure_positive_definite", "objective_positive_definite"}
+}
 RANGE_DEFAULTS = {
     "random_quadratic": {
         "coeff_range": [-1.0, 1.0],
@@ -179,7 +185,18 @@ def _normalize_integer_parameter(benchmark: str, key: str, value: Any) -> Any:
         raise ValueError(f"Instance parameter {benchmark}.{key} must contain integers")
     if not math.isfinite(value) or not float(value).is_integer():
         raise ValueError(f"Instance parameter {benchmark}.{key} must contain integers")
-    return int(value)
+    normalized = int(value)
+    if key == "replicate" and normalized <= 0:
+        raise ValueError(f"Instance parameter {benchmark}.replicate must be positive")
+    return normalized
+
+
+def _normalize_bool_parameter(benchmark: str, key: str, value: Any) -> Any:
+    if isinstance(value, list):
+        return [_normalize_bool_parameter(benchmark, key, item) for item in value]
+    if not isinstance(value, bool):
+        raise ValueError(f"Instance parameter {benchmark}.{key} must contain booleans")
+    return value
 
 
 def _normalize_instances(benchmark: str, instances: dict[str, Any]) -> dict[str, Any]:
@@ -191,9 +208,18 @@ def _normalize_instances(benchmark: str, instances: dict[str, Any]) -> dict[str,
     for key, default in defaults.items():
         merged.setdefault(key, default)
 
+    if (
+        benchmark == "random_quadratic"
+        and merged["objective_positive_definite"] is None
+        and not isinstance(merged["ensure_positive_definite"], list)
+    ):
+        merged["objective_positive_definite"] = merged["ensure_positive_definite"]
+
     for key, parameter_value in list(merged.items()):
         if key in INT_PARAMETERS[benchmark]:
             merged[key] = _normalize_integer_parameter(benchmark, key, parameter_value)
+        elif key in BOOL_PARAMETERS.get(benchmark, set()) and parameter_value is not None:
+            merged[key] = _normalize_bool_parameter(benchmark, key, parameter_value)
         elif key in FLOAT_PARAMETERS.get(benchmark, set()) or key in RANGE_PARAMETERS.get(
             benchmark, set()
         ):
@@ -861,8 +887,10 @@ def _mbigm_options_fingerprint(options: dict[str, Any]) -> str:
 
 def _read_mbigm_cache(
     model, path: Path, options_fingerprint: str
-) -> ComponentMap:
+) -> tuple[ComponentMap, dict[str, Any]]:
     payload = json.loads(path.read_text())
+    if payload.get("schema_version") != 3:
+        raise ValueError(f"M-value cache {path} has unsupported schema version")
     if payload.get("options_fingerprint") != options_fingerprint:
         raise ValueError(
             f"M-value cache {path} was created with different mbigm options"
@@ -874,7 +902,7 @@ def _read_mbigm_cache(
         if constraint is None or disjunct is None:
             raise ValueError(f"M-value cache {path} does not match the rebuilt instance")
         values[constraint, disjunct] = tuple(row["value"])
-    return values
+    return values, payload
 
 
 def _write_mbigm_cache(path: Path, data: dict[str, Any]) -> None:
@@ -920,11 +948,13 @@ def transform_model(
     )
     transform_started = time.perf_counter()
     adapter = None
+    cache_hit = False
+    cache_payload = None
     try:
         TransformationFactory("core.logical_to_linear").apply_to(model)
         applied_options = dict(options)
         options_fingerprint = _mbigm_options_fingerprint(applied_options)
-        cached = (
+        cache_hit = (
             strategy == "gdp.mbigm"
             and mbigm_cache_path is not None
             and mbigm_cache_path.exists()
@@ -933,13 +963,13 @@ def transform_model(
             adapter = _GamsMbigmSolver()
             applied_options["solver"] = adapter
             applied_options["threads"] = 1
-        if cached:
-            applied_options["bigM"] = _read_mbigm_cache(
+        if cache_hit:
+            applied_options["bigM"], cache_payload = _read_mbigm_cache(
                 model, mbigm_cache_path, options_fingerprint
             )
         transformation = TransformationFactory(strategy)
         transformation.apply_to(model, **applied_options)
-        if strategy == "gdp.mbigm" and mbigm_cache_path is not None and not cached:
+        if strategy == "gdp.mbigm" and mbigm_cache_path is not None and not cache_hit:
             rows = []
             for (constraint, disjunct), bounds in transformation.get_all_M_values(model).items():
                 parent = constraint.parent_block()
@@ -961,12 +991,16 @@ def transform_model(
             _write_mbigm_cache(
                 mbigm_cache_path,
                 {
-                    "schema_version": 2,
+                    "schema_version": 3,
                     "options_fingerprint": options_fingerprint,
+                    "m_estimation_time_total_sec": (
+                        adapter.m_estimation_time_sec if adapter is not None else None
+                    ),
                     "provenance": mbigm_provenance or {},
                     "values": rows,
                 },
             )
+            cache_payload = json.loads(mbigm_cache_path.read_text())
         counts = structural_counts(model)
         if mode == "relaxation":
             TransformationFactory("core.relax_integer_vars").apply_to(model)
@@ -978,6 +1012,14 @@ def transform_model(
             )
             if strategy == "gdp.mbigm"
             else None,
+            "m_estimation_time_total_sec": (
+                _as_float(cache_payload.get("m_estimation_time_total_sec"))
+                if cache_payload is not None
+                else (adapter.m_estimation_time_sec if adapter is not None else 0.0)
+            )
+            if strategy == "gdp.mbigm"
+            else None,
+            "m_estimation_cache_hit": cache_hit if strategy == "gdp.mbigm" else None,
             "m_estimation_subsolves": (
                 adapter.m_estimation_subsolves if strategy == "gdp.mbigm" and adapter else 0
             )

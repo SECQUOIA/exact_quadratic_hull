@@ -1,3 +1,4 @@
+import sys
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -25,8 +26,12 @@ from exact_hull.analysis.references import (
 from exact_hull.analysis.verify import verify_record
 from exact_hull.benchmarks import BENCHMARKS
 from exact_hull.benchmarks.base import BenchmarkCase
-from exact_hull.experiment.conic_oracle import _solve_mosek, build_oracle_model, conic_bounds
-from exact_hull.experiment.inspect import inspect_config
+from exact_hull.experiment.conic_oracle import (
+    _solve_gurobi,
+    build_oracle_model,
+    conic_bounds,
+)
+from exact_hull.experiment.inspect import _solver_presolve, inspect_config
 from exact_hull.experiment.results import RunRecord
 from exact_hull.experiment.runner import expand_jobs, load_config, transform_model
 from exact_hull.experiment.structure import structural_counts
@@ -334,6 +339,44 @@ def test_inspect_writes_transform_counts_without_solver_backends(tmp_path, monke
     assert (tmp_path / "inspection.csv").exists()
 
 
+def test_gurobi_inspection_uses_and_records_campaign_parameters(tmp_path, monkeypatch):
+    parameters = {}
+
+    class Model:
+        NumVars = 0
+        NumConstrs = 0
+        NumQConstrs = 0
+
+        @staticmethod
+        def setParam(name, value):
+            parameters[name] = value
+
+        @staticmethod
+        def presolve():
+            return Model()
+
+        @staticmethod
+        def getVars():
+            return []
+
+        @staticmethod
+        def getQConstrs():
+            return []
+
+    gurobi = SimpleNamespace(
+        read=lambda path: Model(),
+        GRB=SimpleNamespace(BINARY="B"),
+    )
+    monkeypatch.setattr(
+        "exact_hull.experiment.inspect.importlib.util.find_spec", lambda name: object()
+    )
+    monkeypatch.setitem(sys.modules, "gurobipy", gurobi)
+    backend, counts = _solver_presolve(tmp_path / "model.lp")
+    assert backend == "gurobipy"
+    assert parameters == {"NonConvex": 2, "FuncNonlinear": 1, "Threads": 1}
+    assert counts["solver_parameters"] == parameters
+
+
 def test_inspect_contains_unexpected_export_errors(tmp_path, monkeypatch):
     monkeypatch.setattr(
         "exact_hull.experiment.inspect.importlib.util.find_spec", lambda name: None
@@ -539,7 +582,7 @@ def test_oracle_missing_backend_has_actionable_error(tmp_path, monkeypatch):
     monkeypatch.setattr(
         "exact_hull.experiment.conic_oracle.importlib.util.find_spec", lambda name: None
     )
-    with pytest.raises(RuntimeError, match=r"install gurobipy or Pyomo\+MOSEK"):
+    with pytest.raises(RuntimeError, match="requires gurobipy; install gurobipy"):
         conic_bounds(ROOT / "configs" / "qualification.toml", tmp_path)
 
 
@@ -559,29 +602,179 @@ def test_oracle_captures_per_instance_backend_errors(tmp_path, monkeypatch):
     assert (tmp_path / "conic-bounds.csv").exists()
 
 
-def test_mosek_oracle_requires_clean_optimal_termination(monkeypatch):
-    model = ConcreteModel()
-    model.x = Var(initialize=1)
-    model.objective = Objective(expr=model.x)
-    result = SimpleNamespace(
-        solver=SimpleNamespace(
-            status=SolverStatus.ok,
-            termination_condition=TerminationCondition.feasible,
-        ),
-        problem=SimpleNamespace(lower_bound=1.0),
-    )
-
-    class Solver:
-        @staticmethod
-        def solve(*args, **kwargs):
-            return result
-
+def test_oracle_does_not_accept_nonoptimal_gurobi_result(tmp_path, monkeypatch):
     monkeypatch.setattr(
-        "exact_hull.experiment.conic_oracle.SolverFactory", lambda name: Solver()
+        "exact_hull.experiment.conic_oracle.importlib.util.find_spec",
+        lambda name: object() if name == "gurobipy" else None,
     )
-    assert _solve_mosek(model)[0] is None
-    result.solver.termination_condition = TerminationCondition.optimal
-    assert _solve_mosek(model)[0] == 1
+    monkeypatch.setattr(
+        "exact_hull.experiment.conic_oracle._solve_gurobi",
+        lambda model: {
+            "status": "TIME_LIMIT",
+            "optimal": False,
+            "primal_objective": 2.0,
+            "dual_bound": 1.0,
+            "runtime_sec": 600.0,
+        },
+    )
+    row = conic_bounds(ROOT / "configs" / "qualification.toml", tmp_path)[0]
+    assert row["backend"] == "gurobipy"
+    assert row["oracle_bound"] is None
+    assert row["primal_objective"] == 2
+    assert row["dual_bound"] == 1
+    assert row["oracle_status"] == "TIME_LIMIT"
+
+
+def test_oracle_uses_optimal_primal_as_bound(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        "exact_hull.experiment.conic_oracle.importlib.util.find_spec",
+        lambda name: object() if name == "gurobipy" else None,
+    )
+    monkeypatch.setattr(
+        "exact_hull.experiment.conic_oracle._solve_gurobi",
+        lambda model: {
+            "status": "OPTIMAL",
+            "optimal": True,
+            "primal_objective": 1.5,
+            "dual_bound": None,
+            "runtime_sec": 2.0,
+        },
+    )
+    row = conic_bounds(ROOT / "configs" / "qualification.toml", tmp_path)[0]
+    assert row["backend"] == "gurobipy"
+    assert row["oracle_bound"] == row["primal_objective"] == 1.5
+    assert row["dual_bound"] is None
+
+
+def test_oracle_refuses_models_with_fallback_rows(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        "exact_hull.experiment.conic_oracle.importlib.util.find_spec",
+        lambda name: object() if name == "gurobipy" else None,
+    )
+    monkeypatch.setattr(
+        "exact_hull.experiment.conic_oracle.build_oracle_model",
+        lambda benchmark, case: (object(), {"n_fallback_rows": 1}),
+    )
+    monkeypatch.setattr(
+        "exact_hull.experiment.conic_oracle._solve_gurobi",
+        lambda model: pytest.fail("a fallback model must not be solved"),
+    )
+    row = conic_bounds(ROOT / "configs" / "qualification.toml", tmp_path)[0]
+    assert row["backend"] is None
+    assert row["oracle_bound"] is None
+    assert row["oracle_status"].startswith("refused: n_fallback_rows=1")
+
+
+def test_gurobi_oracle_sets_limits_and_records_primal_dual_runtime(monkeypatch):
+    parameters = {}
+
+    class Oracle:
+        NumIntVars = 0
+        Status = 2
+        SolCount = 1
+        ObjVal = 3.0
+        ObjBound = 2.5
+        Runtime = 4.0
+
+        @staticmethod
+        def setParam(name, value):
+            parameters[name] = value
+
+        @staticmethod
+        def optimize():
+            pass
+
+    constants = SimpleNamespace(
+        LOADED=1,
+        OPTIMAL=2,
+        INFEASIBLE=3,
+        INF_OR_UNBD=4,
+        UNBOUNDED=5,
+        CUTOFF=6,
+        ITERATION_LIMIT=7,
+        NODE_LIMIT=8,
+        TIME_LIMIT=9,
+        SOLUTION_LIMIT=10,
+        INTERRUPTED=11,
+        NUMERIC=12,
+        SUBOPTIMAL=13,
+        USER_OBJ_LIMIT=15,
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "gurobipy",
+        SimpleNamespace(read=lambda path: Oracle(), GRB=constants),
+    )
+
+    class Model:
+        @staticmethod
+        def write(path, io_options):
+            Path(path).touch()
+
+    result = _solve_gurobi(Model())
+    assert parameters == {"TimeLimit": 600, "Threads": 1}
+    assert result == {
+        "status": "OPTIMAL",
+        "optimal": True,
+        "primal_objective": 3.0,
+        "dual_bound": 2.5,
+        "runtime_sec": 4.0,
+    }
+
+
+def test_gurobi_oracle_accepts_optimal_value_without_dual_bound(monkeypatch):
+    class MissingBoundOracle:
+        NumIntVars = 0
+        Status = 2
+        SolCount = 1
+        ObjVal = 3.0
+        Runtime = 4.0
+
+        @property
+        def ObjBound(self):
+            raise RuntimeError("attribute unavailable")
+
+        @staticmethod
+        def setParam(name, value):
+            pass
+
+        @staticmethod
+        def optimize():
+            pass
+
+    monkeypatch.setitem(
+        sys.modules,
+        "gurobipy",
+        SimpleNamespace(
+            read=lambda path: MissingBoundOracle(),
+            GRB=SimpleNamespace(OPTIMAL=2),
+        ),
+    )
+
+    class Model:
+        @staticmethod
+        def write(path, io_options):
+            Path(path).touch()
+
+    result = _solve_gurobi(Model())
+    assert result["optimal"]
+    assert result["primal_objective"] == 3
+    assert result["dual_bound"] is None
+
+
+def test_oracle_rejects_indefinite_objective_in_fixed_config(tmp_path):
+    config = tmp_path / "indefinite-objective.toml"
+    config.write_text(
+        (ROOT / "configs" / "qualification.toml")
+        .read_text()
+        .replace(
+            "ensure_positive_definite = true",
+            "ensure_positive_definite = true\n\n"
+            "[instances.fixed]\nobjective_positive_definite = false",
+        )
+    )
+    with pytest.raises(ValueError, match="convex-family"):
+        conic_bounds(config, tmp_path / "output")
 
 
 def test_content_ids_do_not_depend_on_grid_enumeration_order():

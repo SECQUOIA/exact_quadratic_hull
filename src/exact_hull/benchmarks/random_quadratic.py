@@ -50,8 +50,13 @@ def build_model(
     x_range: tuple[float, float] = (-1.0, 1.0),
     ensure_positive_definite: bool = False,
     sparsity_factor: float = 0.0,
+    *,
+    objective_positive_definite: bool | None = None,
+    replicate: int = 1,
     seed: int | None = None,
 ) -> pyo.ConcreteModel:
+    if isinstance(replicate, bool) or not isinstance(replicate, int) or replicate <= 0:
+        raise ValueError("replicate must be a positive integer")
     if n_feasible_regions > n_disjuncts_per_disjunction:
         raise ValueError("n_feasible_regions cannot exceed disjuncts per disjunction")
     rng = np.random.default_rng(seed)
@@ -63,7 +68,11 @@ def build_model(
     objective_q, objective_c, objective_d = generate_quadratic_function(
         n_dimensions,
         coeff_range,
-        ensure_positive_definite,
+        (
+            ensure_positive_definite
+            if objective_positive_definite is None
+            else objective_positive_definite
+        ),
         sparsity_factor,
         int(rng.integers(0, 2**63)),
     )
@@ -136,6 +145,11 @@ class RandomQuadraticBenchmark:
     def cases(self, instance_config, base_seed):
         cases = []
         for params in grid_rows(instance_config):
+            params.setdefault("replicate", 1)
+            if params.get("objective_positive_definite") is None:
+                params["objective_positive_definite"] = params.get(
+                    "ensure_positive_definite", False
+                )
             seed = stable_seed(base_seed, params, "random_quadratic")
             instance_id = content_instance_id("rq", "random_quadratic", base_seed, params)
             cases.append(BenchmarkCase(instance_id, params, seed))

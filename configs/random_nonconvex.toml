@@ -2,21 +2,27 @@
 benchmark = "random_quadratic"
 base_seed = 20250603
 time_limit = 3600
-modes = ["solve", "root", "relaxation"]
+modes = ["solve", "root"]
 root_time_limit = 600
 relaxation_time_limit = 600
 
 [instances]
-n_dimensions = [2, 3, 4, 5]
-n_disjunctions = [1, 2, 3, 4, 5]
+n_dimensions = [3, 4, 5]
+n_disjunctions = [2, 3, 4, 5]
 n_disjuncts_per_disjunction = 3
-n_constraints_per_disjunct = [1, 2, 3, 4, 5]
+n_constraints_per_disjunct = 3
 n_feasible_regions = 2
 ensure_positive_definite = false
+objective_positive_definite = true
+replicate = [1, 2]
 
 [[strategies]]
 name = "gdp.bigm"
 label = "bigm"
+
+[[strategies]]
+name = "gdp.mbigm"
+label = "mbigm"
 
 [[strategies]]
 name = "gdp.binary_multiplication"

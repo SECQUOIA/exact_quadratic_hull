@@ -14,6 +14,7 @@ from pyomo.environ import (
 )
 from pyomo.gdp import Disjunct, Disjunction
 from pyomo.gdp.plugins.hull import Hull_Reformulation
+from pyomo.repn.standard_repn import generate_standard_repn
 from pyomo.util.calc_var_value import calculate_variable_from_constraint
 
 import exact_hull
@@ -269,3 +270,29 @@ def test_cehr_eigenvalue_test_is_relative_to_the_largest_eigenvalue():
     TransformationFactory("gdp.hull_exact_conic_no_cholesky").apply_to(model)
     assert model._exact_hull_path_counts["n_cone_rows"] == 2
     assert model._exact_hull_path_counts["n_fallback_rows"] == 0
+
+
+def test_factorized_cehr_keeps_every_positive_eigenvalue():
+    model = ConcreteModel()
+    model.x = Var(bounds=(-2, 2))
+    model.disjunct = Disjunct([1, 2])
+    for disjunct in model.disjunct.values():
+        disjunct.tiny_curvature = Constraint(expr=1e-12 * model.x**2 <= 1)
+    model.choice = Disjunction(expr=list(model.disjunct.values()))
+    TransformationFactory("gdp.hull_exact_conic_original").apply_to(model)
+    coefficients = [
+        float(coefficient)
+        for constraint in model.component_data_objects(Constraint, active=True)
+        if "conic_constraint" in constraint.name
+        for coefficient in (generate_standard_repn(constraint.body).quadratic_coefs or ())
+    ]
+    assert any(coefficient == pytest.approx(1e-12) for coefficient in coefficients)
+
+
+def test_no_cholesky_path_does_not_construct_a_factor(monkeypatch):
+    def unexpected_sqrt(*args, **kwargs):
+        raise AssertionError("factor construction should not run")
+
+    monkeypatch.setattr("exact_hull.transformations.conic.np.sqrt", unexpected_sqrt)
+    model = quadratic_gdp(indices=(1,))
+    TransformationFactory("gdp.hull_exact_conic_no_cholesky").apply_to(model)

@@ -52,7 +52,9 @@ def performance_frames(
     """Build one strategy matrix per solver group, retaining every planned instance."""
     if mode not in {"solve", "root", "relaxation"}:
         raise ValueError(f"Unknown profile mode: {mode}")
-    truth, _ = ground_truth_with_sources(records, references)
+    truth, sources = ground_truth_with_sources(
+        records, references, verification=verification
+    )
     records = [record for record in records if record.mode == mode]
     if planned_jobs is not None:
         planned_jobs = [job for job in planned_jobs if job["mode"] == mode]
@@ -85,7 +87,7 @@ def performance_frames(
         strategies = strategies_by_group[group]
         frame = pd.DataFrame(index=planned_instances, columns=strategies, dtype=float)
         for record in grouped:
-            completed = correctness(record, truth, verification)
+            completed = correctness(record, truth, verification, sources)
             if mode == "root":
                 completed = root_bound_valid(
                     record.lower_bound, record.status, truth.get(record.instance_id)

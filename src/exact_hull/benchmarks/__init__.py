@@ -23,9 +23,11 @@ INSTANCE_PARAMETERS = {
         "constraint_margin",
         "x_range",
         "ensure_positive_definite",
+        "objective_positive_definite",
+        "replicate",
         "sparsity_factor",
     },
-    "kmeans": {"n_dimensions", "n_clusters", "n_points", "coord_range"},
+    "kmeans": {"n_dimensions", "n_clusters", "n_points", "coord_range", "replicate"},
     "cstr": {"NT"},
     "clay": {"instance", "metric"},
 }

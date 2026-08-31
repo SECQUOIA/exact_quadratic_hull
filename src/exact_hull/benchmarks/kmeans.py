@@ -20,8 +20,12 @@ def build_model(
     n_clusters: int,
     n_points: int,
     coord_range: tuple[float, float] = (-1.0, 1.0),
+    *,
+    replicate: int = 1,
     seed: int | None = None,
 ) -> pyo.ConcreteModel:
+    if isinstance(replicate, bool) or not isinstance(replicate, int) or replicate <= 0:
+        raise ValueError("replicate must be a positive integer")
     rng = np.random.default_rng(seed)
     points = rng.uniform(*coord_range, size=(n_points, n_dimensions))
     model = pyo.ConcreteModel(name="kmeans")
@@ -72,14 +76,17 @@ def build_model(
 
 class KMeansBenchmark:
     def cases(self, instance_config, base_seed):
-        return validate_case_ids([
-            BenchmarkCase(
-                content_instance_id("kmeans", "kmeans", base_seed, params),
-                params,
-                stable_seed(base_seed, params, "kmeans"),
+        cases = []
+        for params in grid_rows(instance_config):
+            params.setdefault("replicate", 1)
+            cases.append(
+                BenchmarkCase(
+                    content_instance_id("kmeans", "kmeans", base_seed, params),
+                    params,
+                    stable_seed(base_seed, params, "kmeans"),
+                )
             )
-            for params in grid_rows(instance_config)
-        ])
+        return validate_case_ids(cases)
 
     def build(self, case):
         params = dict(case.params)

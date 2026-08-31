@@ -1,24 +1,23 @@
 [experiment]
-benchmark = "kmeans"
-base_seed = 20250604
+benchmark = "random_quadratic"
+base_seed = 20250601
 time_limit = 3600
-modes = ["solve", "root", "relaxation"]
+modes = ["solve", "root"]
 root_time_limit = 600
 relaxation_time_limit = 600
 
 [instances]
-n_dimensions = [2, 3, 5]
-n_clusters = [3, 5]
-n_points = [12, 15, 17, 20]
+n_dimensions = [3, 5, 7]
+n_disjunctions = [3, 6, 10]
+n_disjuncts_per_disjunction = [10, 15]
+n_constraints_per_disjunct = 10
+n_feasible_regions = 10
+ensure_positive_definite = true
 replicate = [1, 2]
 
 [[strategies]]
 name = "gdp.bigm"
 label = "bigm"
-
-[[strategies]]
-name = "gdp.mbigm"
-label = "mbigm"
 
 [[strategies]]
 name = "gdp.binary_multiplication"
@@ -27,6 +26,8 @@ label = "binmult"
 [[strategies]]
 name = "gdp.hull"
 label = "hull"
+[strategies.options]
+EPS = 1e-4
 
 [[strategies]]
 name = "gdp.hull_exact"
@@ -38,8 +39,5 @@ label = "CEHR"
 
 [[solvers]]
 name = "gams"
-subsolver = "gurobi"
-
-[[solvers]]
-name = "gams"
 subsolver = "scip"
+variant = "convex"

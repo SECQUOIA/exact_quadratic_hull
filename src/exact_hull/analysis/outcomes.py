@@ -31,15 +31,23 @@ def reference_values(references: dict | None) -> dict[str, float]:
 
 
 def ground_truth(
-    records: Iterable[RunRecord], references: dict | None = None
+    records: Iterable[RunRecord],
+    references: dict | None = None,
+    *,
+    verification: dict[str, str] | None,
 ) -> dict[str, float]:
     """Use a certified reference per instance, else population fallback."""
-    truth, _ = ground_truth_with_sources(records, references)
+    truth, _ = ground_truth_with_sources(
+        records, references, verification=verification
+    )
     return truth
 
 
 def ground_truth_with_sources(
-    records: Iterable[RunRecord], references: dict | None = None
+    records: Iterable[RunRecord],
+    references: dict | None = None,
+    *,
+    verification: dict[str, str] | None,
 ) -> tuple[dict[str, float], dict[str, str]]:
     """Return per-instance truth and whether it is certified or population-derived."""
     records = list(records)
@@ -49,6 +57,8 @@ def ground_truth_with_sources(
             record.mode != "solve"
             or record.variant == "convex"
             or record.status not in VERIFIED_OPTIMAL_STATUSES
+            or verification is None
+            or verification.get(record.run_id) != "verified_feasible"
             or record.objective is None
             or not math.isfinite(record.objective)
         ):
@@ -114,18 +124,41 @@ def root_bound_valid(
 def correctness(
     record: RunRecord,
     truth: dict[str, float],
-    verification: dict[str, str] | None = None,
+    verification: dict[str, str] | None,
+    truth_sources: dict[str, str] | None,
 ) -> bool | None:
-    """Return confirmed correct, wrong, or unknown when no reference exists."""
+    """Return confirmed correct only against a certified reference."""
     expected = truth.get(record.instance_id)
     if expected is None:
         return None
     if verification is None or record.run_id not in verification:
         return None
+    source = (truth_sources or {}).get(record.instance_id)
+    if source == "population-fallback":
+        return (
+            False
+            if record.status in VERIFIED_OPTIMAL_STATUSES
+            and record.objective is not None
+            and math.isfinite(record.objective)
+            and record.objective > expected
+            and not is_correct(record.objective, expected)
+            else None
+        )
+    if source != "reference":
+        return None
     return bool(
         record.status in VERIFIED_OPTIMAL_STATUSES
         and is_correct(record.objective, expected)
         and verification[record.run_id] == "verified_feasible"
+    )
+
+
+def negative_control(record: RunRecord) -> bool:
+    """Return whether a convex-flag row intentionally violates solver assumptions."""
+    return bool(
+        record.variant == "convex"
+        and record.transformation
+        in {"gdp.hull_exact", "gdp.binary_multiplication"}
     )
 
 

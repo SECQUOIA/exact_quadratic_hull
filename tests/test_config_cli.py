@@ -16,30 +16,36 @@ ROOT = Path(__file__).parents[1]
 
 def test_all_configs_load_and_expected_case_counts():
     expected = {
-        "random_psd.toml": 240,
-        "random_psd_conic.toml": 18,
-        "random_nonconvex.toml": 100,
-        "eps_relaxation.toml": 240,
-        "kmeans.toml": 96,
-        "clay.toml": 12,
-        "cstr.toml": 9,
-        "smoke.toml": 1,
-        "qualification.toml": 1,
+        "random_psd.toml": (36, 1080),
+        "random_psd_scip_convex.toml": (36, 360),
+        "random_psd_gurobi_auto.toml": (36, 216),
+        "random_psd_conic.toml": (18, 432),
+        "random_nonconvex.toml": (24, 480),
+        "eps_relaxation.toml": (36, 720),
+        "kmeans.toml": (48, 1728),
+        "clay.toml": (6, 216),
+        "cstr.toml": (9, 180),
+        "smoke.toml": (1, 1),
+        "qualification.toml": (1, 54),
     }
     for path in (ROOT / "configs").glob("*.toml"):
         jobs = expand_jobs(load_config(path))
-        assert len({job.instance_id for job in jobs}) == expected[path.name]
+        instance_count, job_count = expected[path.name]
+        assert len({job.instance_id for job in jobs}) == instance_count
+        assert len(jobs) == job_count
 
 
 def test_random_psd_uses_design_of_record_axes():
     config = load_config(ROOT / "configs" / "random_psd.toml")
     instances = config["instances"]
-    assert instances["n_dimensions"] == [3, 4, 5, 6, 7]
-    assert instances["n_disjunctions"] == [3, 4, 5, 6, 7, 8, 9, 10]
-    assert instances["n_disjuncts_per_disjunction"] == [10, 11, 12, 13, 14, 15]
+    assert instances["n_dimensions"] == [3, 5, 7]
+    assert instances["n_disjunctions"] == [3, 6, 10]
+    assert instances["n_disjuncts_per_disjunction"] == [10, 15]
     assert instances["n_constraints_per_disjunct"] == 10
     assert instances["n_feasible_regions"] == 10
     assert instances["ensure_positive_definite"] is True
+    assert instances["objective_positive_definite"] is True
+    assert instances["replicate"] == [1, 2]
 
 
 def test_conic_encoding_ablation_uses_diagnostic_subset():
@@ -47,7 +53,25 @@ def test_conic_encoding_ablation_uses_diagnostic_subset():
     assert config["instances"]["n_dimensions"] == [3, 5, 7]
     assert config["instances"]["n_disjunctions"] == [3, 6, 10]
     assert config["instances"]["n_disjuncts_per_disjunction"] == [10, 15]
+    assert config["instances"]["replicate"] == 1
     assert config["experiment"]["modes"] == ["solve", "relaxation"]
+
+
+def test_conic_instances_are_the_replicate_one_psd_subset():
+    psd_jobs = expand_jobs(load_config(ROOT / "configs" / "random_psd.toml"))
+    conic_jobs = expand_jobs(load_config(ROOT / "configs" / "random_psd_conic.toml"))
+    psd_replicate_one = {
+        job.instance_id for job in psd_jobs if job.params["replicate"] == 1
+    }
+    assert {job.instance_id for job in conic_jobs} == psd_replicate_one
+
+
+def test_epsilon_campaign_has_no_psd_job_fingerprint_overlap():
+    psd = {job.run_id for job in expand_jobs(load_config(ROOT / "configs" / "random_psd.toml"))}
+    epsilon = {
+        job.run_id for job in expand_jobs(load_config(ROOT / "configs" / "eps_relaxation.toml"))
+    }
+    assert psd.isdisjoint(epsilon)
 
 
 def test_main_campaign_strategy_and_solver_matrix():
@@ -61,10 +85,20 @@ def test_main_campaign_strategy_and_solver_matrix():
     }
     assert {(item["subsolver"], item["variant"]) for item in random_psd["solvers"]} == {
         ("gurobi", None),
-        ("gurobi", "auto"),
         ("scip", None),
-        ("scip", "convex"),
     }
+    assert {
+        (item["subsolver"], item["variant"])
+        for item in load_config(ROOT / "configs" / "random_psd_scip_convex.toml")[
+            "solvers"
+        ]
+    } == {("scip", "convex")}
+    assert {
+        (item["subsolver"], item["variant"])
+        for item in load_config(ROOT / "configs" / "random_psd_gurobi_auto.toml")[
+            "solvers"
+        ]
+    } == {("gurobi", "auto")}
     assert {item["name"] for item in load_config(ROOT / "configs" / "cstr.toml")["solvers"]} == {
         "gams"
     }
@@ -369,6 +403,77 @@ subsolver = "scip"
     assert (
         expand_jobs(load_config(omitted))[0].run_id == expand_jobs(load_config(explicit))[0].run_id
     )
+
+
+def test_new_generator_defaults_have_the_same_identity_when_explicit(tmp_path):
+    common = """
+[experiment]
+benchmark = "random_quadratic"
+base_seed = 7
+[instances]
+ensure_positive_definite = true
+{parameters}
+[[strategies]]
+name = "gdp.hull_exact"
+[[solvers]]
+subsolver = "scip"
+"""
+    omitted = tmp_path / "omitted-new-defaults.toml"
+    explicit = tmp_path / "explicit-new-defaults.toml"
+    omitted.write_text(common.format(parameters=""))
+    explicit.write_text(
+        common.format(parameters="replicate = 1\nobjective_positive_definite = true")
+    )
+    omitted_job = expand_jobs(load_config(omitted))[0]
+    explicit_job = expand_jobs(load_config(explicit))[0]
+    assert omitted_job.params["replicate"] == 1
+    assert omitted_job.params["objective_positive_definite"] is True
+    assert omitted_job.seed == explicit_job.seed
+    assert omitted_job.instance_id == explicit_job.instance_id
+
+
+def test_objective_convexity_default_tracks_a_constraint_convexity_axis(tmp_path):
+    path = tmp_path / "convexity-axis.toml"
+    path.write_text(
+        """
+[experiment]
+benchmark = "random_quadratic"
+[instances]
+ensure_positive_definite = [true, false]
+[[strategies]]
+name = "gdp.hull_exact"
+[[solvers]]
+subsolver = "scip"
+"""
+    )
+    jobs = expand_jobs(load_config(path))
+    assert len(jobs) == 2
+    assert {
+        (job.params["ensure_positive_definite"], job.params["objective_positive_definite"])
+        for job in jobs
+    } == {(True, True), (False, False)}
+
+
+@pytest.mark.parametrize("value", ["0", "-1", "false", "1.5"])
+def test_replicate_must_be_a_positive_integer(tmp_path, value):
+    path = tmp_path / "bad-replicate.toml"
+    path.write_text(
+        f"""
+[experiment]
+benchmark = "kmeans"
+[instances]
+n_dimensions = 2
+n_clusters = 2
+n_points = 3
+replicate = {value}
+[[strategies]]
+name = "gdp.hull_exact"
+[[solvers]]
+subsolver = "scip"
+"""
+    )
+    with pytest.raises(ValueError, match="replicate"):
+        load_config(path)
 
 
 def test_omitted_and_explicit_transformation_defaults_have_same_identity(tmp_path):

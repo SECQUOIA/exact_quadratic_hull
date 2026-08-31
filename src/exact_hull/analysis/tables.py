@@ -11,6 +11,7 @@ from exact_hull.analysis.outcomes import (
     ground_truth_with_sources,
     invalid_certificate,
     is_correct,
+    negative_control,
     reference_values,
     relaxation_certified,
     root_bound_valid,
@@ -34,7 +35,9 @@ def summary(
         "correct",
         "ground_truth_source",
     ]
-    truth, sources = ground_truth_with_sources(records, references)
+    truth, sources = ground_truth_with_sources(
+        records, references, verification=verification
+    )
     certified_truth = reference_values(references)
     frame = pd.DataFrame(
         {
@@ -44,7 +47,7 @@ def summary(
             "subsolver": record.subsolver,
             "variant": record.variant,
             "status": record.status,
-            "correct": correctness(record, truth, verification),
+            "correct": correctness(record, truth, verification, sources),
             "ground_truth_source": sources.get(record.instance_id, "unknown"),
             "solver_time_sec": record.solver_time_sec,
             "time_limit": record.time_limit,
@@ -95,7 +98,9 @@ def methods(
         for job in planned_jobs
         if job["mode"] == "solve"
     }
-    truth, sources = ground_truth_with_sources(records, references)
+    truth, sources = ground_truth_with_sources(
+        records, references, verification=verification
+    )
     certified_truth = reference_values(references)
     rows = []
     for key in sorted(keys, key=repr):
@@ -111,7 +116,7 @@ def methods(
             )
             == key
         ]
-        states = [correctness(record, truth, verification) for record in group]
+        states = [correctness(record, truth, verification, sources) for record in group]
         planned_group = [
             job
             for job in planned_jobs
@@ -137,6 +142,18 @@ def methods(
                 ),
                 "unknown_reference_count": sum(
                     sources.get(record.instance_id) != "reference" for record in group
+                ),
+                "m_estimation_time_total_sec": sum(
+                    next(
+                        (
+                            candidate.m_estimation_time_total_sec
+                            for candidate in group
+                            if candidate.instance_id == instance_id
+                            and candidate.m_estimation_time_total_sec is not None
+                        ),
+                        0.0,
+                    )
+                    for instance_id in {record.instance_id for record in group}
                 ),
             }
         )
@@ -179,9 +196,15 @@ BOUND_COLUMNS = [
 ]
 
 
-def bounds(records: list[RunRecord], references: dict | None = None) -> pd.DataFrame:
+def bounds(
+    records: list[RunRecord],
+    references: dict | None = None,
+    verification: dict[str, str] | None = None,
+) -> pd.DataFrame:
     """Combine solve, root, and relaxation records by formulation and solver."""
-    truth, sources = ground_truth_with_sources(records, references)
+    truth, sources = ground_truth_with_sources(
+        records, references, verification=verification
+    )
     certified_truth = reference_values(references)
     grouped = {}
     for record in records:
@@ -204,7 +227,7 @@ def bounds(records: list[RunRecord], references: dict | None = None) -> pd.DataF
                 "ground_truth": truth.get(record.instance_id),
                 "ground_truth_source": sources.get(record.instance_id, "unknown"),
                 "invalid_certificate": False,
-                "negative_control": record.variant == "convex",
+                "negative_control": negative_control(record),
             },
         )
         row["invalid_certificate"] = row["invalid_certificate"] or invalid_certificate(
@@ -306,10 +329,14 @@ def bounds(records: list[RunRecord], references: dict | None = None) -> pd.DataF
     return pd.DataFrame(grouped.values(), columns=BOUND_COLUMNS)
 
 
-def censoring(records: list[RunRecord], references: dict | None = None) -> pd.DataFrame:
+def censoring(
+    records: list[RunRecord],
+    references: dict | None = None,
+    verification: dict[str, str] | None = None,
+) -> pd.DataFrame:
     """Count excluded root and relaxation observations by method and reason."""
     rows = []
-    truth = ground_truth(records, references)
+    truth = ground_truth(records, references, verification=verification)
     for record in records:
         reason = None
         if record.mode == "root":

@@ -20,6 +20,9 @@ def _solver_presolve(path: Path) -> tuple[str | None, dict]:
         import gurobipy as gp
 
         model = gp.read(str(path))
+        parameters = {"NonConvex": 2, "FuncNonlinear": 1, "Threads": 1}
+        for name, parameter_value in parameters.items():
+            model.setParam(name, parameter_value)
         presolved = model.presolve()
         has_binary_square = False
         has_binary_bilinear = False
@@ -45,6 +48,7 @@ def _solver_presolve(path: Path) -> tuple[str | None, dict]:
                 has_epigraph_term and has_binary_product
             )
         return "gurobipy", {
+            "solver_parameters": parameters,
             "solver_presolved_num_variables": presolved.NumVars,
             "solver_presolved_num_constraints": presolved.NumConstrs,
             "solver_presolved_num_quadratic_constraints": presolved.NumQConstrs,

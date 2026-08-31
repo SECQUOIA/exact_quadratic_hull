@@ -96,66 +96,77 @@ class ConicExactHullBase(ExactHullBase):
                 linear += sign * repn.constant * indicator
             relations[side] = linear <= sign * bound * indicator
 
-            positive = eigenvalues > 1e-10
-            factor = eigenvectors[:, positive] @ np.diag(np.sqrt(eigenvalues[positive]))
-            factor_expressions = [
-                sum(factor[row, column] * variables[row] for row in range(len(variables)))
-                for column in range(factor.shape[1])
-            ]
             if self.representation == "no_cholesky":
                 cone_quadratic = quadratic_terms(constraint, substitute_map, sign)
                 cone_relation = cone_quadratic <= auxiliary * indicator
-            elif self.representation == "factorized":
-                cone_relation = (
-                    sum(value**2 for value in factor_expressions) <= auxiliary * indicator
-                )
-            elif self.representation in {"no_sqrt", "sqrt"}:
-                left = sum((2 * value) ** 2 for value in factor_expressions)
-                left += (auxiliary - indicator) ** 2
-                right = auxiliary + indicator
-                cone_relation = (
-                    left <= right**2 if self.representation == "no_sqrt" else sqrt(left) <= right
-                )
             else:
-                z = _add_auxiliary(
-                    block,
-                    constraint,
-                    constraint_map,
-                    f"conic_aux_z_{side}",
-                    Var(range(len(factor_expressions))),
-                )
-                w = _add_auxiliary(block, constraint, constraint_map, f"conic_aux_w_{side}", Var())
-                s = _add_auxiliary(
-                    block,
-                    constraint,
-                    constraint_map,
-                    f"conic_aux_s_{side}",
-                    Var(domain=NonNegativeReals),
-                )
-                for position, value in enumerate(factor_expressions):
+                clamped = np.maximum(eigenvalues, 0.0)
+                positive = clamped > 0.0
+                factor = eigenvectors[:, positive] @ np.diag(np.sqrt(clamped[positive]))
+                factor_expressions = [
+                    sum(factor[row, column] * variables[row] for row in range(len(variables)))
+                    for column in range(factor.shape[1])
+                ]
+                if self.representation == "factorized":
+                    cone_relation = (
+                        sum(value**2 for value in factor_expressions) <= auxiliary * indicator
+                    )
+                elif self.representation in {"no_sqrt", "sqrt"}:
+                    left = sum((2 * value) ** 2 for value in factor_expressions)
+                    left += (auxiliary - indicator) ** 2
+                    right = auxiliary + indicator
+                    cone_relation = (
+                        left <= right**2
+                        if self.representation == "no_sqrt"
+                        else sqrt(left) <= right
+                    )
+                else:
+                    z = _add_auxiliary(
+                        block,
+                        constraint,
+                        constraint_map,
+                        f"conic_aux_z_{side}",
+                        Var(range(len(factor_expressions))),
+                    )
+                    w = _add_auxiliary(
+                        block, constraint, constraint_map, f"conic_aux_w_{side}", Var()
+                    )
+                    s = _add_auxiliary(
+                        block,
+                        constraint,
+                        constraint_map,
+                        f"conic_aux_s_{side}",
+                        Var(domain=NonNegativeReals),
+                    )
+                    for position, value in enumerate(factor_expressions):
+                        _add_auxiliary(
+                            block,
+                            constraint,
+                            constraint_map,
+                            f"conic_z_def_{side}_{position}",
+                            Constraint(expr=z[position] == 2 * value),
+                        )
                     _add_auxiliary(
                         block,
                         constraint,
                         constraint_map,
-                        f"conic_z_def_{side}_{position}",
-                        Constraint(expr=z[position] == 2 * value),
+                        f"conic_w_def_{side}",
+                        Constraint(expr=w == auxiliary - indicator),
                     )
-                _add_auxiliary(
-                    block,
-                    constraint,
-                    constraint_map,
-                    f"conic_w_def_{side}",
-                    Constraint(expr=w == auxiliary - indicator),
-                )
-                _add_auxiliary(
-                    block,
-                    constraint,
-                    constraint_map,
-                    f"conic_s_def_{side}",
-                    Constraint(expr=s == auxiliary + indicator),
-                )
-                left = sum(z[position] ** 2 for position in range(len(factor_expressions))) + w**2
-                cone_relation = left <= s**2 if self.representation == "extra" else sqrt(left) <= s
+                    _add_auxiliary(
+                        block,
+                        constraint,
+                        constraint_map,
+                        f"conic_s_def_{side}",
+                        Constraint(expr=s == auxiliary + indicator),
+                    )
+                    left = (
+                        sum(z[position] ** 2 for position in range(len(factor_expressions)))
+                        + w**2
+                    )
+                    cone_relation = (
+                        left <= s**2 if self.representation == "extra" else sqrt(left) <= s
+                    )
             _add_auxiliary(
                 block,
                 constraint,

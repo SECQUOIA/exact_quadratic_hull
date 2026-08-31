@@ -2,7 +2,7 @@
 benchmark = "cstr"
 base_seed = 20250605
 time_limit = 3600
-modes = ["solve", "root", "relaxation"]
+modes = ["solve", "root"]
 root_time_limit = 600
 relaxation_time_limit = 600
 
@@ -28,10 +28,6 @@ label = "hull"
 [[strategies]]
 name = "gdp.hull_exact"
 label = "GEHR"
-
-[[strategies]]
-name = "gdp.hull_exact_conic_no_cholesky"
-label = "CEHR-mixed"
 
 [[solvers]]
 name = "gams"

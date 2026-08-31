@@ -446,7 +446,14 @@ def test_mbigm_cache_is_reused_and_transform_times_are_recorded(tmp_path, monkey
     )
     assert cache.exists()
     assert first._exact_hull_transform_stats["m_estimation_subsolves"] > 0
+    assert not first._exact_hull_transform_stats["m_estimation_cache_hit"]
+    assert first._exact_hull_transform_stats["m_estimation_time_total_sec"] == pytest.approx(
+        first._exact_hull_transform_stats["m_estimation_time_sec"]
+    )
     cache_payload = json.loads(cache.read_text())
+    assert cache_payload["m_estimation_time_total_sec"] == pytest.approx(
+        first._exact_hull_transform_stats["m_estimation_time_total_sec"]
+    )
     assert all(
         not row["constraint"].startswith(f"{row['disjunct']}.")
         for row in cache_payload["values"]
@@ -457,6 +464,11 @@ def test_mbigm_cache_is_reused_and_transform_times_are_recorded(tmp_path, monkey
     )
     assert first._exact_hull_transform_stats["transform_sec"] > 0
     assert second._exact_hull_transform_stats["m_estimation_subsolves"] == 0
+    assert second._exact_hull_transform_stats["m_estimation_cache_hit"]
+    assert second._exact_hull_transform_stats["m_estimation_time_sec"] == 0
+    assert second._exact_hull_transform_stats["m_estimation_time_total_sec"] == pytest.approx(
+        first._exact_hull_transform_stats["m_estimation_time_total_sec"]
+    )
     assert first_counts == second_counts
     assert sum(1 for _ in first.component_data_objects(Var)) == sum(
         1 for _ in second.component_data_objects(Var)
@@ -473,6 +485,14 @@ def test_mbigm_cache_is_reused_and_transform_times_are_recorded(tmp_path, monkey
     )
 
     payload = json.loads(cache.read_text())
+    payload["schema_version"] = 2
+    write_json_atomic(payload, cache)
+    with pytest.raises(ValueError, match="unsupported schema version"):
+        runner.transform_model(
+            model(), "gdp.mbigm", options, "solve", mbigm_cache_path=cache
+        )
+
+    payload["schema_version"] = 3
     payload["values"].pop()
     write_json_atomic(payload, cache)
     truncated = model()

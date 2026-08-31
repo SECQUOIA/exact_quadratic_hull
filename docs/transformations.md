@@ -22,8 +22,6 @@ quadratic equalities use the GEHR homogenized fallback. The transformation recor
 fallback, equality-fallback, and epigraph-variable counts on the model for experiment
 instrumentation.
 
-For non-default factorized CEHR encodings, a matrix is admitted when its minimum
-eigenvalue is at least `-1e-9 * max(1, abs(max_eigenvalue))`, but factor construction
-retains only eigenvalues strictly greater than `1e-10`. Admitted eigenvalues from that
-negative threshold through `1e-10` are therefore omitted from the factor. The default
-`no_cholesky` campaign arm is unaffected.
+For factorized CEHR encodings, accepted negative eigenvalues are clamped to zero and every
+strictly positive eigenvalue is retained in the factor. The `no_cholesky` encoding applies
+the same relative PSD acceptance test but does not construct the unused factor.

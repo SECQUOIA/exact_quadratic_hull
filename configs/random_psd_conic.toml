@@ -3,6 +3,7 @@ benchmark = "random_quadratic"
 base_seed = 20250601
 time_limit = 3600
 modes = ["solve", "relaxation"]
+root_time_limit = 600
 relaxation_time_limit = 600
 
 # Encoding ablation on a diagnostic subset; not a core formulation comparison.

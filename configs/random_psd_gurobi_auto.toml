@@ -2,7 +2,7 @@
 benchmark = "random_quadratic"
 base_seed = 20250601
 time_limit = 3600
-modes = ["solve", "root", "relaxation"]
+modes = ["solve", "root"]
 root_time_limit = 600
 relaxation_time_limit = 600
 
@@ -20,18 +20,10 @@ name = "gdp.bigm"
 label = "bigm"
 
 [[strategies]]
-name = "gdp.binary_multiplication"
-label = "binmult"
-
-[[strategies]]
 name = "gdp.hull"
 label = "hull"
 [strategies.options]
 EPS = 1e-4
-
-[[strategies]]
-name = "gdp.hull_exact"
-label = "GEHR"
 
 [[strategies]]
 name = "gdp.hull_exact_conic_no_cholesky"
@@ -40,7 +32,4 @@ label = "CEHR"
 [[solvers]]
 name = "gams"
 subsolver = "gurobi"
-
-[[solvers]]
-name = "gams"
-subsolver = "scip"
+variant = "auto"

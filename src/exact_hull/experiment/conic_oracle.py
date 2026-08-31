@@ -8,8 +8,7 @@ import math
 import tempfile
 from pathlib import Path
 
-from pyomo.environ import Objective, SolverFactory, Var, value
-from pyomo.opt import SolverStatus, TerminationCondition
+from pyomo.environ import Var
 
 from exact_hull.benchmarks import BENCHMARKS
 from exact_hull.experiment.results import write_json_atomic
@@ -20,7 +19,7 @@ def build_oracle_model(benchmark_name: str, case):
     """Build a binary-free CEHR relaxation and a backend-independent descriptor."""
     model = BENCHMARKS[benchmark_name].build(case)
     counts, _, _, _ = transform_model(
-        model, "gdp.hull_exact_conic_no_cholesky", {}, "relaxation"
+        model, "gdp.hull_exact_conic_original", {}, "relaxation"
     )
     path_counts = getattr(model, "_exact_hull_path_counts", {})
     binary_count = sum(
@@ -35,7 +34,15 @@ def build_oracle_model(benchmark_name: str, case):
     return model, descriptor
 
 
-def _solve_gurobi(model) -> tuple[float | None, str]:
+def _finite(candidate) -> float | None:
+    try:
+        result = float(candidate)
+    except (TypeError, ValueError):
+        return None
+    return result if math.isfinite(result) else None
+
+
+def _solve_gurobi(model) -> dict:
     import gurobipy as gp
 
     with tempfile.TemporaryDirectory(prefix="exact-hull-conic-oracle-") as temporary:
@@ -44,50 +51,30 @@ def _solve_gurobi(model) -> tuple[float | None, str]:
         oracle = gp.read(str(model_path))
         if oracle.NumIntVars:
             raise RuntimeError("Oracle export unexpectedly contains integer variables")
-        # Deliberately do not set NonConvex: acceptance is part of the recognition datum.
+        oracle.setParam("TimeLimit", 600)
+        oracle.setParam("Threads", 1)
         oracle.optimize()
-        if oracle.Status != gp.GRB.OPTIMAL:
-            status_names = {
-                getattr(gp.GRB, name): name
-                for name in (
-                    "LOADED", "INFEASIBLE", "INF_OR_UNBD", "UNBOUNDED", "CUTOFF",
-                    "ITERATION_LIMIT", "NODE_LIMIT", "TIME_LIMIT", "SOLUTION_LIMIT",
-                    "INTERRUPTED", "NUMERIC", "SUBOPTIMAL", "USER_OBJ_LIMIT",
-                )
-                if hasattr(gp.GRB, name)
-            }
-            return None, status_names.get(oracle.Status, f"status_{oracle.Status}")
-        candidate = float(oracle.ObjVal)
-        return (candidate if math.isfinite(candidate) else None), "OPTIMAL"
-
-
-def _solve_mosek(model) -> tuple[float | None, str]:
-    solver = SolverFactory("mosek_direct")
-    result = solver.solve(model, tee=False)
-    status = result.solver.status
-    termination = result.solver.termination_condition
-    if status != SolverStatus.ok or termination not in {
-        TerminationCondition.optimal,
-        TerminationCondition.globallyOptimal,
-    }:
-        return None, f"{status}/{termination}"
-    candidate = getattr(result.problem, "lower_bound", None)
-    try:
-        bound = float(candidate)
-    except (TypeError, ValueError):
-        bound = None
-    if bound is None or not math.isfinite(bound):
-        bound = None
-    if bound is None:
-        objective = next(model.component_data_objects(Objective, active=True), None)
-        candidate = value(objective, exception=False) if objective is not None else None
+        status_names = {
+            getattr(gp.GRB, name): name
+            for name in (
+                "LOADED", "OPTIMAL", "INFEASIBLE", "INF_OR_UNBD", "UNBOUNDED", "CUTOFF",
+                "ITERATION_LIMIT", "NODE_LIMIT", "TIME_LIMIT", "SOLUTION_LIMIT",
+                "INTERRUPTED", "NUMERIC", "SUBOPTIMAL", "USER_OBJ_LIMIT",
+            )
+            if hasattr(gp.GRB, name)
+        }
+        primal = _finite(oracle.ObjVal) if oracle.SolCount else None
         try:
-            bound = float(candidate)
-        except (TypeError, ValueError):
-            bound = None
-        if bound is not None and not math.isfinite(bound):
-            bound = None
-    return bound, str(termination)
+            dual = _finite(oracle.ObjBound)
+        except Exception:
+            dual = None
+        return {
+            "status": status_names.get(oracle.Status, f"status_{oracle.Status}"),
+            "optimal": oracle.Status == gp.GRB.OPTIMAL and primal is not None,
+            "primal_objective": primal,
+            "dual_bound": dual,
+            "runtime_sec": _finite(oracle.Runtime),
+        }
 
 
 def _write_rows(rows: list[dict], output_directory: Path) -> None:
@@ -103,38 +90,49 @@ def conic_bounds(config_path: Path, output_directory: Path) -> list[dict]:
     """Solve each instance's CEHR relaxation through a direct solver API."""
     config = load_config(config_path)
     benchmark_name = config["experiment"]["benchmark"]
-    if benchmark_name == "cstr" or (
-        benchmark_name == "random_quadratic"
-        and config["instances"].get("ensure_positive_definite") is not True
-    ):
+    if benchmark_name == "cstr":
         raise ValueError("conic-bound requires a convex-family configuration")
     cases = BENCHMARKS[benchmark_name].cases(
         config["instances"], config["experiment"]["base_seed"]
     )
+    if benchmark_name == "random_quadratic" and any(
+        case.params["ensure_positive_definite"] is not True
+        or case.params["objective_positive_definite"] is not True
+        for case in cases
+    ):
+        raise ValueError("conic-bound requires a convex-family configuration")
     output_directory.mkdir(parents=True, exist_ok=True)
     rows = []
-    gurobi_available = importlib.util.find_spec("gurobipy") is not None
-    mosek_available = importlib.util.find_spec("mosek") is not None
-    backend = "gurobipy" if gurobi_available else "mosek" if mosek_available else None
-    if backend is None:
-        raise RuntimeError(
-            "No independent conic backend is available; install gurobipy or Pyomo+MOSEK"
-        )
+    if importlib.util.find_spec("gurobipy") is None:
+        raise RuntimeError("The conic oracle requires gurobipy; install gurobipy")
     for case in cases:
         descriptor = {}
+        backend = None
+        result = {}
         bound = None
         try:
             model, descriptor = build_oracle_model(benchmark_name, case)
-            if backend == "gurobipy":
-                bound, status = _solve_gurobi(model)
+            if descriptor.get("n_fallback_rows", 0) > 0:
+                status = (
+                    "refused: "
+                    f"n_fallback_rows={descriptor['n_fallback_rows']}; "
+                    "oracle requires a pure factorized CEHR relaxation"
+                )
             else:
-                bound, status = _solve_mosek(model)
+                backend = "gurobipy"
+                result = _solve_gurobi(model)
+                status = result["status"]
+                if result["optimal"]:
+                    bound = result["primal_objective"]
         except Exception as error:
             status = f"{type(error).__name__}: {error}"
         rows.append(
             {
                 "instance_id": case.instance_id,
                 "oracle_bound": bound,
+                "primal_objective": result.get("primal_objective"),
+                "dual_bound": result.get("dual_bound"),
+                "runtime_sec": result.get("runtime_sec"),
                 "oracle_status": status,
                 "backend": backend,
                 **descriptor,
