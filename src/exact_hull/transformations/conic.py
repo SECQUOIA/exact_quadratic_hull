@@ -7,8 +7,10 @@ from pyomo.common.modeling import unique_component_name
 from pyomo.environ import Constraint, NonNegativeReals, Var, sqrt
 from pyomo.repn.standard_repn import generate_standard_repn
 
-from exact_hull.transformations.base import ExactHullBase, registered
+from exact_hull.transformations.base import ExactHullBase, increment_path_count, registered
 from exact_hull.transformations.general import homogeneous_quadratic, quadratic_terms
+
+EIGENVALUE_RELATIVE_TOL = 1e-9
 
 
 def _add_auxiliary(block, source, constraint_map, stem, component):
@@ -50,6 +52,8 @@ class ConicExactHullBase(ExactHullBase):
     def _quadratic_relations(self, constraint, disjunct, substitute_map, constraint_map):
         indicator = disjunct.binary_indicator_var
         if constraint.equality:
+            increment_path_count(constraint.model(), "n_fallback_rows")
+            increment_path_count(constraint.model(), "n_equality_fallback_rows")
             expression = homogeneous_quadratic(constraint, indicator, substitute_map)
             return {"eq": expression == constraint.lower * indicator**2}
 
@@ -62,7 +66,9 @@ class ConicExactHullBase(ExactHullBase):
                 continue
             repn, matrix, variables = _quadratic_data(constraint, substitute_map, sign)
             eigenvalues, eigenvectors = np.linalg.eigh(matrix)
-            if np.any(eigenvalues < -1e-10):
+            scale = max(1.0, abs(float(eigenvalues[-1]))) if len(eigenvalues) else 1.0
+            if len(eigenvalues) and float(eigenvalues[0]) < -EIGENVALUE_RELATIVE_TOL * scale:
+                increment_path_count(constraint.model(), "n_fallback_rows")
                 expression = homogeneous_quadratic(constraint, indicator, substitute_map)
                 relations[side] = (
                     expression >= bound * indicator**2
@@ -79,6 +85,8 @@ class ConicExactHullBase(ExactHullBase):
                 f"conic_aux_t_{side}",
                 Var(domain=NonNegativeReals),
             )
+            increment_path_count(constraint.model(), "n_epigraph_vars")
+            increment_path_count(constraint.model(), "n_cone_rows")
             linear = auxiliary
             for coefficient, variable in zip(
                 repn.linear_coefs or (), repn.linear_vars or (), strict=True

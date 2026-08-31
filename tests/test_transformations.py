@@ -237,3 +237,35 @@ def test_diagonal_inequality_terms_use_power_expression(name):
     transformation.apply_to(model)
     transformed = transformation.get_transformed_constraints(model.disjunct[1].quadratic[1])
     assert any("**2" in str(constraint.body) for constraint in transformed)
+
+
+def test_cehr_records_cone_fallback_equality_and_epigraph_paths():
+    model = ConcreteModel()
+    model.x = Var(bounds=(-2, 2))
+    model.disjunct = Disjunct([1, 2])
+    for disjunct in model.disjunct.values():
+        disjunct.convex = Constraint(expr=model.x**2 <= 1)
+        disjunct.nonconvex = Constraint(expr=-(model.x**2) <= 1)
+        disjunct.equality = Constraint(expr=model.x**2 == 1)
+    model.choice = Disjunction(expr=list(model.disjunct.values()))
+    TransformationFactory("gdp.hull_exact_conic_no_cholesky").apply_to(model)
+    assert model._exact_hull_path_counts == {
+        "n_cone_rows": 2,
+        "n_fallback_rows": 4,
+        "n_equality_fallback_rows": 2,
+        "n_epigraph_vars": 2,
+    }
+
+
+def test_cehr_eigenvalue_test_is_relative_to_the_largest_eigenvalue():
+    model = ConcreteModel()
+    model.x = Var([1, 2], bounds=(-2, 2))
+    model.disjunct = Disjunct([1, 2])
+    for disjunct in model.disjunct.values():
+        disjunct.nearly_psd = Constraint(
+            expr=1e6 * model.x[1] ** 2 - 5e-4 * model.x[2] ** 2 <= 1
+        )
+    model.choice = Disjunction(expr=list(model.disjunct.values()))
+    TransformationFactory("gdp.hull_exact_conic_no_cholesky").apply_to(model)
+    assert model._exact_hull_path_counts["n_cone_rows"] == 2
+    assert model._exact_hull_path_counts["n_fallback_rows"] == 0

@@ -38,8 +38,10 @@ subsolver = "scip"
 variant = "convex"
 ```
 
-`benchmark` is one of `random_quadratic`, `kmeans`, `cstr`, or `clay`. Strategy options are explicit values passed to Pyomo; labels are presentation names only and do not affect job fingerprints. Computationally duplicate strategies and labels shared by different strategies are rejected. Unknown instance keys, transformations, subsolvers, and solver variants fail while loading the config. The only solver variant is `variant = "convex"` for SCIP; omit `variant` for Gurobi or ordinary SCIP runs.
+`benchmark` is one of `random_quadratic`, `kmeans`, `cstr`, or `clay`. Supported built-in strategies include `gdp.bigm`, `gdp.mbigm`, `gdp.binary_multiplication`, and `gdp.hull`. Options are validated against the transformation CONFIG block. Labels do not affect job fingerprints. Computationally duplicate strategies and labels shared by different strategies are rejected.
+
+SCIP accepts `variant = "convex"`, which sets `constraints/nonlinear/assumeconvex = TRUE`. Gurobi accepts `variant = "auto"`, which omits `NonConvex`; its default variant sets `NonConvex 2`. Other variants fail during loading.
 
 `modes` is a nonempty, duplicate-free list drawn from `solve`, `root`, and `relaxation`; it defaults to `["solve"]`. A `root` job runs the transformed discrete model through node zero, while a `relaxation` job relaxes all integer variables after the GDP transformation. `root_time_limit` and `relaxation_time_limit` are optional positive finite numbers and default to `time_limit`. Each mode's effective time limit and full solver option list are part of the job fingerprint.
 
-A deterministic seed is derived from `base_seed` and each instance parameter map. It does not depend on Python's process-randomized hash or NumPy's global random state.
+A deterministic seed and content-addressed ID with a family prefix and twelve hexadecimal hash characters are derived from the benchmark name, `base_seed`, and normalized parameter map. They do not depend on grid order, Python's process-randomized hash, or NumPy's global random state. Case generation raises if two distinct parameter maps ever collide after truncation.

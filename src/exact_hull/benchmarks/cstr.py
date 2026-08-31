@@ -12,7 +12,13 @@ Chemical Engineering 137, 106794. https://doi.org/10.1016/j.compchemeng.2020.106
 import pyomo.environ as pyo
 from pyomo.gdp import Disjunct
 
-from exact_hull.benchmarks.base import BenchmarkCase, grid_rows, stable_seed
+from exact_hull.benchmarks.base import (
+    BenchmarkCase,
+    content_instance_id,
+    grid_rows,
+    stable_seed,
+    validate_case_ids,
+)
 
 BEST_KNOWN_NT5_OBJECTIVE = 3.06181298849707
 
@@ -920,10 +926,14 @@ def build_model(NT: int = 5) -> pyo.ConcreteModel:
 
 class CstrBenchmark:
     def cases(self, instance_config, base_seed):
-        return [
-            BenchmarkCase(f"cstr-nt-{params['NT']}", params, stable_seed(base_seed, params))
+        return validate_case_ids([
+            BenchmarkCase(
+                content_instance_id("cstr", "cstr", base_seed, params),
+                params,
+                stable_seed(base_seed, params, "cstr"),
+            )
             for params in grid_rows(instance_config)
-        ]
+        ])
 
     def build(self, case):
         return build_model(**case.params)

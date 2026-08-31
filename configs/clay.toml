@@ -11,6 +11,18 @@ instance = ["CLay0203", "CLay0204", "CLay0205", "CLay0303", "CLay0304", "CLay030
 metric = ["l1", "l2"]
 
 [[strategies]]
+name = "gdp.bigm"
+label = "bigm"
+
+[[strategies]]
+name = "gdp.mbigm"
+label = "mbigm"
+
+[[strategies]]
+name = "gdp.binary_multiplication"
+label = "binmult"
+
+[[strategies]]
 name = "gdp.hull"
 label = "hull"
 

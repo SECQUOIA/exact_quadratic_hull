@@ -23,11 +23,11 @@ def _common(time_limit: float) -> list[str]:
 
 
 def gurobi_options(time_limit: float, variant: str | None = None) -> list[str]:
-    if variant is not None:
+    if variant not in {None, "auto"}:
         raise ValueError(f"Unknown Gurobi variant: {variant}")
-    return _common(time_limit) + [
+    options = _common(time_limit) + [
         "$onecho > gurobi.opt",
-        "NonConvex 2",
+        "FuncNonlinear 1",
         "Threads 1",
         f"MIPGap {TOLS['rel_gap']:g}",
         f"MIPGapAbs {TOLS['abs_gap']:g}",
@@ -37,6 +37,9 @@ def gurobi_options(time_limit: float, variant: str | None = None) -> list[str]:
         "$offecho",
         "GAMS_MODEL.optfile=1;",
     ]
+    if variant is None:
+        options.insert(options.index("Threads 1"), "NonConvex 2")
+    return options
 
 
 def scip_options(time_limit: float, variant: str | None = None) -> list[str]:

@@ -2,7 +2,8 @@
 benchmark = "random_quadratic"
 base_seed = 20250601
 time_limit = 3600
-modes = ["relaxation"]
+modes = ["root", "relaxation"]
+root_time_limit = 600
 relaxation_time_limit = 600
 
 [instances]

@@ -2,7 +2,7 @@
 
 from pyomo.repn.standard_repn import generate_standard_repn
 
-from exact_hull.transformations.base import ExactHullBase, registered
+from exact_hull.transformations.base import ExactHullBase, increment_path_count, registered
 
 
 def homogeneous_quadratic(constraint, indicator, substitute_map, sign=1):
@@ -45,6 +45,13 @@ def quadratic_terms(constraint, substitute_map, sign=1):
 class ExactHull(ExactHullBase):
     def _quadratic_relations(self, constraint, disjunct, substitute_map, constraint_map):
         del constraint_map
+        increment_path_count(
+            constraint.model(),
+            "n_fallback_rows",
+            1
+            if constraint.equality
+            else int(constraint.lower is not None) + int(constraint.upper is not None),
+        )
         indicator = disjunct.binary_indicator_var
         expression = homogeneous_quadratic(constraint, indicator, substitute_map)
         if constraint.equality:

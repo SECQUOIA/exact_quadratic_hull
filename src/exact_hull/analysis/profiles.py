@@ -6,6 +6,17 @@ import numpy as np
 import pandas as pd
 
 
+def shifted_geometric_mean(times, shift: float = 10.0) -> float:
+    """Return ``geomean(times + shift) - shift`` for finite nonnegative times."""
+    values = np.asarray(list(times), dtype=float)
+    values = values[np.isfinite(values)]
+    if not len(values):
+        return float("nan")
+    if shift <= 0 or np.any(values < 0):
+        raise ValueError("shift must be positive and times must be nonnegative")
+    return float(np.exp(np.mean(np.log(values + shift))) - shift)
+
+
 def dolan_more(times: pd.DataFrame, taus: np.ndarray | None = None) -> pd.DataFrame:
     """Compute fractions within tau of each instance's best finite time."""
     if taus is None:

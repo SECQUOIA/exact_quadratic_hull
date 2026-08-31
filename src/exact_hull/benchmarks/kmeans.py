@@ -6,7 +6,13 @@ import numpy as np
 import pyomo.environ as pyo
 from pyomo.gdp import Disjunct, Disjunction
 
-from exact_hull.benchmarks.base import BenchmarkCase, grid_rows, stable_seed
+from exact_hull.benchmarks.base import (
+    BenchmarkCase,
+    content_instance_id,
+    grid_rows,
+    stable_seed,
+    validate_case_ids,
+)
 
 
 def build_model(
@@ -66,10 +72,14 @@ def build_model(
 
 class KMeansBenchmark:
     def cases(self, instance_config, base_seed):
-        return [
-            BenchmarkCase(f"kmeans-{number:04d}", params, stable_seed(base_seed, params))
-            for number, params in enumerate(grid_rows(instance_config), 1)
-        ]
+        return validate_case_ids([
+            BenchmarkCase(
+                content_instance_id("kmeans", "kmeans", base_seed, params),
+                params,
+                stable_seed(base_seed, params, "kmeans"),
+            )
+            for params in grid_rows(instance_config)
+        ])
 
     def build(self, case):
         params = dict(case.params)

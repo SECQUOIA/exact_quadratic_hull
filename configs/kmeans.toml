@@ -12,12 +12,28 @@ n_clusters = [3, 4, 5]
 n_points = [10, 11, 12, 13, 14, 15, 16, 17]
 
 [[strategies]]
+name = "gdp.bigm"
+label = "bigm"
+
+[[strategies]]
+name = "gdp.mbigm"
+label = "mbigm"
+
+[[strategies]]
+name = "gdp.binary_multiplication"
+label = "binmult"
+
+[[strategies]]
 name = "gdp.hull"
 label = "hull"
 
 [[strategies]]
 name = "gdp.hull_exact"
 label = "GEHR"
+
+[[strategies]]
+name = "gdp.hull_exact_conic_no_cholesky"
+label = "CEHR"
 
 [[solvers]]
 name = "gams"

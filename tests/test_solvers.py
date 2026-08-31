@@ -13,6 +13,8 @@ def test_shared_tolerance_policy_and_native_options():
     }
     gurobi = "\n".join(options_for("gurobi", 60))
     assert "option optca=1e-10;" in gurobi
+    assert "FuncNonlinear 1" in gurobi
+    assert "NonConvex 2" in gurobi
     for name in ("MIPGapAbs", "FeasibilityTol", "OptimalityTol", "IntFeasTol"):
         assert name in gurobi
     scip = "\n".join(options_for("scip", 60))
@@ -22,6 +24,12 @@ def test_shared_tolerance_policy_and_native_options():
 
 def test_scip_convex_variant_is_an_option():
     assert "constraints/nonlinear/assumeconvex = TRUE" in options_for("scip", 60, "convex")
+
+
+def test_gurobi_auto_variant_leaves_convexity_recognition_enabled():
+    options = options_for("gurobi", 60, "auto")
+    assert "NonConvex 2" not in options
+    assert "FuncNonlinear 1" in options
 
 
 @pytest.mark.parametrize("subsolver", ["gurobi", "scip"])

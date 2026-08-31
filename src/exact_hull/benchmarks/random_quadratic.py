@@ -6,7 +6,13 @@ import numpy as np
 import pyomo.environ as pyo
 from pyomo.gdp import Disjunct, Disjunction
 
-from exact_hull.benchmarks.base import BenchmarkCase, grid_rows, stable_seed
+from exact_hull.benchmarks.base import (
+    BenchmarkCase,
+    content_instance_id,
+    grid_rows,
+    stable_seed,
+    validate_case_ids,
+)
 
 
 def generate_quadratic_function(
@@ -129,10 +135,11 @@ def build_model(
 class RandomQuadraticBenchmark:
     def cases(self, instance_config, base_seed):
         cases = []
-        for number, params in enumerate(grid_rows(instance_config), 1):
-            seed = stable_seed(base_seed, params)
-            cases.append(BenchmarkCase(f"rq-{number:04d}", params, seed))
-        return cases
+        for params in grid_rows(instance_config):
+            seed = stable_seed(base_seed, params, "random_quadratic")
+            instance_id = content_instance_id("rq", "random_quadratic", base_seed, params)
+            cases.append(BenchmarkCase(instance_id, params, seed))
+        return validate_case_ids(cases)
 
     def build(self, case):
         return build_model(seed=case.seed, **case.params)

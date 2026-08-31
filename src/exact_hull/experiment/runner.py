@@ -7,9 +7,13 @@ import hashlib
 import io
 import json
 import math
+import os
 import platform
+import re
 import shutil
 import subprocess
+import sys
+import tempfile
 import time
 import tomllib
 from dataclasses import asdict, dataclass
@@ -18,21 +22,40 @@ from pathlib import Path
 from typing import Any
 
 import pyomo
-from pyomo.environ import Objective, SolverFactory, TransformationFactory, value
+from pyomo.common.collections import ComponentMap
+from pyomo.common.enums import SolverAPIVersion
+from pyomo.core.plugins.transform.logical_to_linear import update_boolean_vars_from_binary
+from pyomo.environ import (
+    BooleanVar,
+    ConcreteModel,
+    Constraint,
+    ConstraintList,
+    Objective,
+    SolverFactory,
+    TransformationFactory,
+    Var,
+    value,
+)
+from pyomo.gdp import Disjunct
+from pyomo.gdp.util import clone_without_expression_components
 from pyomo.opt import SolverStatus, TerminationCondition
 
 from exact_hull.benchmarks import BENCHMARKS, INSTANCE_PARAMETERS
 from exact_hull.benchmarks.base import BenchmarkCase
-from exact_hull.experiment.logparse import parse_solver_bounds, solver_timed_out
+from exact_hull.experiment.logparse import (
+    parse_solver_bounds,
+    parse_solver_metadata,
+    solver_timed_out,
+)
 from exact_hull.experiment.results import (
     RUN_MODES,
     RunRecord,
     is_valid_result,
     validate_manifest,
-    write_json_atomic,
     write_record_atomic,
 )
-from exact_hull.experiment.solvers import options_for
+from exact_hull.experiment.solvers import TOLS, options_for
+from exact_hull.experiment.structure import structural_counts
 from exact_hull.transformations import TRANSFORMATIONS
 
 RANGE_PARAMETERS = {
@@ -142,7 +165,11 @@ def _normalize_strategy_options(name: str, options: dict[str, Any]) -> dict[str,
         config = TransformationFactory(name).CONFIG(options)
     except (TypeError, ValueError) as error:
         raise ValueError(f"Invalid options for transformation {name}: {error}") from error
-    return {key: _normalize_option_numbers(config[key]) for key in config}
+    normalized = {key: _normalize_option_numbers(config[key]) for key in config}
+    # mbigm's solver option is a Pyomo solver object; the manifest stores its name.
+    if name == "gdp.mbigm" and hasattr(config["solver"], "name"):
+        normalized["solver"] = config["solver"].name
+    return normalized
 
 
 def _normalize_integer_parameter(benchmark: str, key: str, value: Any) -> Any:
@@ -200,7 +227,12 @@ def load_config(path: Path) -> dict[str, Any]:
     _validate_instance_config(benchmark, raw_instances)
     if not config.get("strategies") or not config.get("solvers"):
         raise ValueError("Config must define at least one strategy and solver")
-    known = set(TRANSFORMATIONS) | {"gdp.hull", "gdp.bigm"}
+    known = set(TRANSFORMATIONS) | {
+        "gdp.hull",
+        "gdp.bigm",
+        "gdp.mbigm",
+        "gdp.binary_multiplication",
+    }
     strategies = []
     identities = set()
     labels = {}
@@ -317,7 +349,10 @@ def expand_jobs(config: dict[str, Any]) -> list[Job]:
 
 
 def build_manifest(
-    config: dict[str, Any], jobs: list[Job], execution_limit: int | None = None
+    config: dict[str, Any],
+    jobs: list[Job],
+    execution_limit: int | None = None,
+    versions: dict[str, str | None] | None = None,
 ) -> dict[str, Any]:
     """Return the normalized campaign plan used by execution and reporting."""
     instances = []
@@ -334,6 +369,7 @@ def build_manifest(
         "planned_jobs": [asdict(job) for job in jobs],
         "instances": instances,
         "execution": {"initial_limit": execution_limit},
+        "versions": _versions() if versions is None else versions,
     }
 
 
@@ -361,8 +397,9 @@ def _first_difference(existing: Any, expected: Any, path: str) -> str | None:
 
 
 def _manifest_mismatch(existing: dict[str, Any], expected: dict[str, Any]) -> str | None:
-    existing_core = {key: value for key, value in existing.items() if key != "execution"}
-    expected_core = {key: value for key, value in expected.items() if key != "execution"}
+    ignored = {"execution", "versions"}
+    existing_core = {key: value for key, value in existing.items() if key not in ignored}
+    expected_core = {key: value for key, value in expected.items() if key not in ignored}
     if existing_core == expected_core:
         return None
     config_field = _first_difference(
@@ -381,16 +418,58 @@ def _manifest_mismatch(existing: dict[str, Any], expected: dict[str, Any]) -> st
     return f"{field} differs"
 
 
-def _prepare_manifest(output_directory: Path, manifest: dict[str, Any], resume: bool) -> None:
+def _environment_differences(existing: dict[str, Any], current: dict[str, str | None]) -> list[str]:
+    recorded = existing.get("versions", {})
+    return [
+        f"{name}: manifest={recorded.get(name)!r}, current={current.get(name)!r}"
+        for name in ("python", "pyomo", "gams")
+        if recorded.get(name) != current.get(name)
+    ]
+
+
+def _validate_existing_manifest(
+    existing: dict[str, Any], expected: dict[str, Any], strict_env: bool
+) -> None:
+    validate_manifest(existing)
+    mismatch = _manifest_mismatch(existing, expected)
+    if mismatch:
+        raise ValueError(f"Cannot resume: {mismatch}")
+    differences = _environment_differences(existing, expected.get("versions", {}))
+    if differences:
+        message = "Resume environment differs from manifest: " + "; ".join(differences)
+        if strict_env:
+            raise ValueError(message)
+        print(f"WARNING: {message}", file=sys.stderr)
+
+
+def _prepare_manifest(
+    output_directory: Path,
+    manifest: dict[str, Any],
+    resume: bool,
+    strict_env: bool = False,
+) -> None:
     manifest_path = output_directory / "manifest.json"
     stale_temporary = output_directory / ".manifest.json.tmp"
     entries = (
-        [path for path in output_directory.iterdir() if path != stale_temporary]
+        [
+            path
+            for path in output_directory.iterdir()
+            if path != stale_temporary
+            and not (path.name.startswith(".manifest.") and path.name.endswith(".tmp"))
+        ]
         if output_directory.exists()
         else []
     )
     nonempty = bool(entries)
     if nonempty:
+        if not resume and entries == [manifest_path]:
+            try:
+                existing = json.loads(manifest_path.read_text())
+                validate_manifest(existing)
+            except (OSError, json.JSONDecodeError, TypeError, ValueError) as error:
+                raise ValueError(f"Invalid campaign manifest: {error}") from error
+            if _manifest_mismatch(existing, manifest) is None:
+                return
         if not resume:
             raise ValueError(
                 f"Output directory is not empty: {output_directory}; use --resume to continue"
@@ -399,18 +478,36 @@ def _prepare_manifest(output_directory: Path, manifest: dict[str, Any], resume: 
             raise ValueError(f"Cannot resume without manifest: {manifest_path}")
         try:
             existing = json.loads(manifest_path.read_text())
-            validate_manifest(existing)
+            _validate_existing_manifest(existing, manifest, strict_env)
         except (OSError, json.JSONDecodeError, TypeError, ValueError) as error:
             raise ValueError(f"Invalid campaign manifest: {error}") from error
-        mismatch = _manifest_mismatch(existing, manifest)
-        if mismatch:
-            raise ValueError(f"Cannot resume: {mismatch}")
         if stale_temporary.exists():
             stale_temporary.unlink()
         return
     if stale_temporary.exists():
         stale_temporary.unlink()
-    write_json_atomic(manifest, manifest_path)
+    output_directory.mkdir(parents=True, exist_ok=True)
+    payload = json.dumps(manifest, indent=2, sort_keys=True) + "\n"
+    with tempfile.NamedTemporaryFile(
+        "w", dir=output_directory, prefix=".manifest.", suffix=".tmp", delete=False
+    ) as stream:
+        temporary = Path(stream.name)
+        stream.write(payload)
+        stream.flush()
+        os.fsync(stream.fileno())
+    try:
+        try:
+            os.link(temporary, manifest_path)
+        except FileExistsError:
+            try:
+                existing = json.loads(manifest_path.read_text())
+                _validate_existing_manifest(existing, manifest, strict_env)
+            except (OSError, json.JSONDecodeError, TypeError, ValueError) as validation_error:
+                raise ValueError(
+                    f"Concurrent campaign manifest validation failed: {validation_error}"
+                ) from validation_error
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def _repository_git_sha() -> str | None:
@@ -429,6 +526,12 @@ def _repository_git_sha() -> str | None:
     return None
 
 
+def _parse_gams_version(output: str) -> str | None:
+    """Extract the stable release token, excluding the banner timestamp."""
+    match = re.search(r"\b(\d+\.\d+\.\d+)\b", output)
+    return match.group(1) if match else None
+
+
 def _versions() -> dict[str, str | None]:
     gams_version = None
     gams = shutil.which("gams")
@@ -437,7 +540,7 @@ def _versions() -> dict[str, str | None]:
             output = subprocess.run(
                 [gams, "-version"], capture_output=True, text=True, check=False, timeout=10
             )
-            gams_version = (output.stdout or output.stderr).splitlines()[0].strip() or None
+            gams_version = _parse_gams_version(output.stdout or output.stderr)
         except (OSError, subprocess.TimeoutExpired, IndexError):
             pass
     return {
@@ -495,8 +598,13 @@ def _status(
             TerminationCondition.feasible,
         }
         and rel_gap is not None
-        and rel_gap <= 1e-12
-        and (solver_status != SolverStatus.warning or mode == "root")
+        and rel_gap <= (TOLS["rel_gap"] if mode == "root" else 1e-12)
+        and (
+            mode != "root"
+            or termination
+            in {TerminationCondition.globallyOptimal, TerminationCondition.optimal}
+        )
+        and solver_status == SolverStatus.ok
     ):
         return (
             "globally_optimal" if termination == TerminationCondition.globallyOptimal else "optimal"
@@ -514,6 +622,13 @@ def _status(
     }:
         return "timeout"
     if solver_status == SolverStatus.warning:
+        if mode == "root" and termination in {
+            TerminationCondition.globallyOptimal,
+            TerminationCondition.optimal,
+            TerminationCondition.feasible,
+            TerminationCondition.other,
+        }:
+            return "feasible"
         return "solver_error"
     effective_time = solver_time_sec if solver_time_sec is not None else wall_time_sec
     if (
@@ -539,9 +654,9 @@ def _status(
         and (rel_gap is None or rel_gap > 1e-12)
     ):
         return "feasible"
-    if termination == TerminationCondition.globallyOptimal:
+    if termination == TerminationCondition.globallyOptimal and solver_status == SolverStatus.ok:
         return "globally_optimal"
-    if termination == TerminationCondition.optimal:
+    if termination == TerminationCondition.optimal and solver_status == SolverStatus.ok:
         return "optimal"
     if termination == TerminationCondition.locallyOptimal:
         return "locally_optimal"
@@ -599,6 +714,27 @@ def _describe(error: BaseException) -> str:
     return f"{type(error).__name__}: {error}"
 
 
+def _attach_transform_counts(record: RunRecord, model, counts: dict[str, int]) -> None:
+    for name, count in counts.items():
+        setattr(record, name, count)
+    path_counts = getattr(model, "_exact_hull_path_counts", None)
+    if path_counts is not None:
+        for name, count in path_counts.items():
+            setattr(record, name, count)
+    for name, transform_value in getattr(model, "_exact_hull_transform_stats", {}).items():
+        setattr(record, name, transform_value)
+
+
+def _attach_log_metadata(record: RunRecord, log_path: Path, subsolver: str) -> str:
+    log_text = log_path.read_text(errors="replace") if log_path.exists() else ""
+    if log_text:
+        metadata = parse_solver_metadata(log_text, subsolver)
+        record.versions["solver"] = metadata.pop("version")
+        for name, metadata_value in metadata.items():
+            setattr(record, name, metadata_value)
+    return log_text
+
+
 def _load_solution(model, result) -> bool:
     """Load the solver's solution into ``model``; False when no usable incumbent exists.
 
@@ -616,6 +752,239 @@ def _load_solution(model, result) -> bool:
     except (ValueError, TypeError, KeyError):
         return False
     return True
+
+
+class _GamsMbigmSolver:
+    """V1-marked adapter allowing Pyomo's mbigm estimator to use GAMS."""
+
+    name = "gams/gurobi"
+    options: dict[str, Any] = {}
+
+    def __init__(self):
+        self.m_estimation_time_sec = 0.0
+        self.m_estimation_subsolves = 0
+
+    @staticmethod
+    def api_version():
+        return SolverAPIVersion.V1
+
+    def solve(self, model, **kwargs):
+        kwargs.pop("keepfiles", None)
+        standalone = ConcreteModel()
+        expressions = [
+            objective.expr
+            for objective in model.component_data_objects(Objective, active=True)
+        ] + [
+            constraint.expr
+            for constraint in model.component_data_objects(Constraint, active=True)
+        ]
+        variables = []
+        seen = set()
+        from pyomo.core.expr import identify_variables
+
+        for expression in expressions:
+            for variable in identify_variables(expression, include_fixed=True):
+                if id(variable) not in seen:
+                    variables.append(variable)
+                    seen.add(id(variable))
+        substitute = {}
+        for index, variable in enumerate(variables):
+            clone = Var(domain=variable.domain, bounds=(variable.lb, variable.ub))
+            standalone.add_component(f"v_{index}", clone)
+            if variable.fixed:
+                clone.fix(value(variable))
+            substitute[id(variable)] = clone
+        standalone.constraints = ConstraintList()
+        for constraint in model.component_data_objects(Constraint, active=True):
+            body = clone_without_expression_components(constraint.body, substitute=substitute)
+            lower = clone_without_expression_components(constraint.lower, substitute=substitute)
+            upper = clone_without_expression_components(constraint.upper, substitute=substitute)
+            standalone.constraints.add((lower, body, upper))
+        objective = next(model.component_data_objects(Objective, active=True))
+        standalone.objective = Objective(
+            expr=clone_without_expression_components(objective.expr, substitute=substitute),
+            sense=objective.sense,
+        )
+        mbigm_options = options_for("gurobi", 30)
+        mbigm_options.insert(mbigm_options.index("$offecho"), "DualReductions 0")
+        solve_started = time.perf_counter()
+        self.m_estimation_subsolves += 1
+        try:
+            result = SolverFactory("gams").solve(
+                standalone,
+                solver="gurobi",
+                add_options=mbigm_options,
+                **kwargs,
+            )
+        finally:
+            self.m_estimation_time_sec += time.perf_counter() - solve_started
+        lower = _as_bound(getattr(result.problem, "lower_bound", None))
+        upper = _as_bound(getattr(result.problem, "upper_bound", None))
+        close_bound = (
+            lower is not None
+            and upper is not None
+            and abs(upper - lower)
+            <= TOLS["rel_gap"] * max(abs(lower), abs(upper), 1.0)
+        )
+        termination = result.solver.termination_condition
+        if result.solver.status != SolverStatus.ok:
+            # mbigm treats infeasible as a proof that it may prune a disjunct.  Only
+            # pass recognized success/proof terminations from a clean solver run.
+            result.solver.termination_condition = TerminationCondition.error
+        elif termination == TerminationCondition.globallyOptimal or (
+            termination == TerminationCondition.feasible and close_bound
+        ):
+            result.solver.termination_condition = TerminationCondition.optimal
+        elif termination not in {
+            TerminationCondition.optimal,
+            TerminationCondition.infeasible,
+        }:
+            result.solver.termination_condition = TerminationCondition.error
+        return result
+
+
+def _mbigm_options_fingerprint(options: dict[str, Any]) -> str:
+    solver = options.get("solver")
+    if isinstance(solver, _GamsMbigmSolver):
+        solver_name = "gurobi"
+    elif isinstance(solver, str) or solver is None:
+        solver_name = solver
+    else:
+        solver_name = getattr(solver, "name", str(solver))
+    normalized = {
+        **{key: value for key, value in options.items() if key != "solver"},
+        "solver": solver_name,
+    }
+    payload = json.dumps(normalized, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(payload.encode()).hexdigest()
+
+
+def _read_mbigm_cache(
+    model, path: Path, options_fingerprint: str
+) -> ComponentMap:
+    payload = json.loads(path.read_text())
+    if payload.get("options_fingerprint") != options_fingerprint:
+        raise ValueError(
+            f"M-value cache {path} was created with different mbigm options"
+        )
+    values = ComponentMap()
+    for row in payload["values"]:
+        constraint = model.find_component(row["constraint"])
+        disjunct = model.find_component(row["disjunct"])
+        if constraint is None or disjunct is None:
+            raise ValueError(f"M-value cache {path} does not match the rebuilt instance")
+        values[constraint, disjunct] = tuple(row["value"])
+    return values
+
+
+def _write_mbigm_cache(path: Path, data: dict[str, Any]) -> None:
+    """Atomically publish one valid M set, accepting a same-options race winner."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = json.dumps(data, indent=2, sort_keys=True) + "\n"
+    with tempfile.NamedTemporaryFile(
+        "w", dir=path.parent, prefix=f".{path.name}.", suffix=".tmp", delete=False
+    ) as stream:
+        temporary = Path(stream.name)
+        stream.write(payload)
+        stream.flush()
+        os.fsync(stream.fileno())
+    try:
+        try:
+            os.link(temporary, path)
+        except FileExistsError as error:
+            existing = json.loads(path.read_text())
+            if existing.get("options_fingerprint") != data["options_fingerprint"]:
+                raise ValueError(
+                    f"M-value cache {path} was concurrently created with different mbigm options"
+                ) from error
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def transform_model(
+    model,
+    strategy: str,
+    options: dict[str, Any],
+    mode: str,
+    *,
+    mbigm_cache_path: Path | None = None,
+    mbigm_provenance: dict[str, Any] | None = None,
+):
+    """Apply the same logical, GDP, structural-count, and mode steps used by jobs."""
+    original_variables = list(model.component_data_objects(Var, active=None, descend_into=True))
+    original_booleans = list(
+        model.component_data_objects(BooleanVar, active=None, descend_into=True)
+    )
+    original_disjuncts = list(
+        model.component_data_objects(Disjunct, active=None, descend_into=True)
+    )
+    transform_started = time.perf_counter()
+    adapter = None
+    try:
+        TransformationFactory("core.logical_to_linear").apply_to(model)
+        applied_options = dict(options)
+        options_fingerprint = _mbigm_options_fingerprint(applied_options)
+        cached = (
+            strategy == "gdp.mbigm"
+            and mbigm_cache_path is not None
+            and mbigm_cache_path.exists()
+        )
+        if strategy == "gdp.mbigm" and applied_options.get("solver") == "gurobi":
+            adapter = _GamsMbigmSolver()
+            applied_options["solver"] = adapter
+            applied_options["threads"] = 1
+        if cached:
+            applied_options["bigM"] = _read_mbigm_cache(
+                model, mbigm_cache_path, options_fingerprint
+            )
+        transformation = TransformationFactory(strategy)
+        transformation.apply_to(model, **applied_options)
+        if strategy == "gdp.mbigm" and mbigm_cache_path is not None and not cached:
+            rows = []
+            for (constraint, disjunct), bounds in transformation.get_all_M_values(model).items():
+                parent = constraint.parent_block()
+                while parent is not None and not isinstance(parent, Disjunct):
+                    parent = parent.parent_block()
+                if parent is disjunct:
+                    continue
+                rows.append(
+                    {
+                        "constraint": constraint.name,
+                        "disjunct": disjunct.name,
+                        "value": [
+                            _as_float(bound) if bound is not None else None
+                            for bound in bounds
+                        ],
+                    }
+                )
+            rows.sort(key=lambda row: (row["constraint"], row["disjunct"]))
+            _write_mbigm_cache(
+                mbigm_cache_path,
+                {
+                    "schema_version": 2,
+                    "options_fingerprint": options_fingerprint,
+                    "provenance": mbigm_provenance or {},
+                    "values": rows,
+                },
+            )
+        counts = structural_counts(model)
+        if mode == "relaxation":
+            TransformationFactory("core.relax_integer_vars").apply_to(model)
+    finally:
+        model._exact_hull_transform_stats = {
+            "transform_sec": time.perf_counter() - transform_started,
+            "m_estimation_time_sec": (
+                adapter.m_estimation_time_sec if strategy == "gdp.mbigm" and adapter else 0.0
+            )
+            if strategy == "gdp.mbigm"
+            else None,
+            "m_estimation_subsolves": (
+                adapter.m_estimation_subsolves if strategy == "gdp.mbigm" and adapter else 0
+            )
+            if strategy == "gdp.mbigm"
+            else None,
+        }
+    return counts, original_variables, original_booleans, original_disjuncts
 
 
 def run_job(
@@ -639,16 +1008,36 @@ def run_job(
             versions,
             "The model must have exactly one active minimization objective",
         )
-    try:
-        TransformationFactory("core.logical_to_linear").apply_to(model)
-        TransformationFactory(job.strategy).apply_to(model, **job.transformation_options)
-        if job.mode == "relaxation":
-            TransformationFactory("core.relax_integer_vars").apply_to(model)
-    except Exception as error:
-        return _base_record(job, "transform_error", started, versions, _describe(error))
     job_directory = output_directory / "jobs" / job.run_id
     scratch = job_directory / "scratch"
     log_path = job_directory / "solver.log"
+    try:
+        counts, original_variables, original_booleans, original_disjuncts = transform_model(
+            model,
+            job.strategy,
+            job.transformation_options,
+            job.mode,
+            mbigm_cache_path=(
+                output_directory / "mbigm" / f"{job.instance_id}.json"
+                if job.strategy == "gdp.mbigm"
+                else None
+            ),
+            mbigm_provenance={
+                "benchmark": job.benchmark,
+                "instance_id": job.instance_id,
+                "instance_params": job.params,
+                "seed": job.seed,
+                "pyomo": versions.get("pyomo"),
+                "solver": "gams/gurobi",
+                "time_limit_sec": 30,
+                "dual_reductions": 0,
+                "threads": 1,
+            },
+        )
+    except Exception as error:
+        record = _base_record(job, "transform_error", started, versions, _describe(error))
+        _attach_transform_counts(record, model, {})
+        return record
     try:
         scratch.mkdir(parents=True, exist_ok=True)
         solver = SolverFactory("gams")
@@ -670,8 +1059,9 @@ def run_job(
         finally:
             shutil.rmtree(scratch, ignore_errors=True)
         has_solution = _load_solution(model, result)
-        log_text = log_path.read_text(errors="replace") if log_path.exists() else ""
         record = _base_record(job, "solver_error", started, versions)
+        _attach_transform_counts(record, model, counts)
+        log_text = _attach_log_metadata(record, log_path, job.subsolver)
         record.solver_time_sec = _as_float(getattr(result.solver, "user_time", None))
         record.solver_status = str(result.solver.status)
         record.termination = str(result.solver.termination_condition)
@@ -703,9 +1093,34 @@ def run_job(
             record.objective = _as_float(value(objectives[0], exception=False))
         record.solution = {}
         if has_solution:
+            if job.mode == "solve":
+                try:
+                    update_boolean_vars_from_binary(model)
+                except ValueError:
+                    # Preserve the numeric payload. Verification will classify
+                    # fractional or contradictory indicator representations.
+                    pass
             try:
                 record.solution = benchmark.solution(model)
-            except (ValueError, TypeError):
+                indicator_variable_ids = {
+                    id(disjunct.binary_indicator_var) for disjunct in original_disjuncts
+                }
+                record.solution["variables"] = {
+                    variable.name: _as_float(value(variable, exception=False))
+                    for variable in original_variables
+                    if id(variable) not in indicator_variable_ids
+                }
+                record.solution["indicators"] = {
+                    disjunct.name: _as_float(
+                        value(disjunct.binary_indicator_var, exception=False)
+                    )
+                    for disjunct in original_disjuncts
+                }
+                record.solution["booleans"] = {
+                    boolean.name: value(boolean, exception=False)
+                    for boolean in original_booleans
+                }
+            except (KeyError, ValueError, TypeError):
                 record.solution = {}
         record.duration_sec = time.perf_counter() - started
         record.status = _status(
@@ -734,28 +1149,47 @@ def run_job(
         record.timestamp = datetime.now(UTC).isoformat()
         return record
     except Exception as error:
-        return _base_record(job, "solver_error", started, versions, _describe(error))
+        record = _base_record(job, "solver_error", started, versions, _describe(error))
+        _attach_transform_counts(record, model, counts)
+        try:
+            _attach_log_metadata(record, log_path, job.subsolver)
+        except Exception:
+            pass
+        return record
 
 
-def run(config_path: Path, output_directory: Path, limit=None, resume=False) -> list[RunRecord]:
+def run(
+    config_path: Path,
+    output_directory: Path,
+    limit=None,
+    resume=False,
+    rerun_statuses: set[str] | None = None,
+    shard: tuple[int, int] | None = None,
+    strict_env: bool = False,
+) -> list[RunRecord]:
     config = load_config(config_path)
     planned_jobs = expand_jobs(config)
+    versions = _versions()
     _prepare_manifest(
         output_directory,
-        build_manifest(config, planned_jobs, execution_limit=limit),
+        build_manifest(config, planned_jobs, execution_limit=limit, versions=versions),
         resume,
+        strict_env,
     )
-    jobs = planned_jobs[:limit] if limit is not None else planned_jobs
-    versions = _versions()
+    jobs = planned_jobs
+    if shard is not None:
+        shard_number, shard_count = shard
+        jobs = [job for index, job in enumerate(jobs) if index % shard_count == shard_number - 1]
+    jobs = jobs[:limit] if limit is not None else jobs
     records = []
     for job in jobs:
         destination = output_directory / "jobs" / job.run_id / "result.json"
-        if (
-            resume
-            and destination.exists()
-            and is_valid_result(destination, job.run_id, asdict(job))
+        if resume and destination.exists() and is_valid_result(
+            destination, job.run_id, asdict(job)
         ):
-            continue
+            existing_status = RunRecord.from_dict(json.loads(destination.read_text())).status
+            if not rerun_statuses or existing_status not in rerun_statuses:
+                continue
         record = run_job(job, output_directory, versions)
         write_record_atomic(record, destination)
         records.append(record)

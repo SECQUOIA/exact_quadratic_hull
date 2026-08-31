@@ -31,6 +31,7 @@ Run it on a machine with GAMS and SCIP:
 exact-hull run configs/smoke.toml --out results/smoke
 exact-hull report results/smoke
 exact-hull plot results/smoke
+exact-hull verify results/smoke
 ```
 
 Every solver job builds a fresh model and writes one atomic JSON result. Re-run an interrupted campaign with `--resume`:
@@ -38,6 +39,8 @@ Every solver job builds a fresh model and writes one atomic JSON result. Re-run 
 ```console
 exact-hull run configs/random_psd.toml --resume results/random-psd
 ```
+
+Use `exact-hull inspect CONFIG` for transformation/presolve instrumentation, `exact-hull reference RUN_DIR` for certified objectives, and `exact-hull conic-bound CONFIG` for the independent CEHR relaxation oracle.
 
 See [configuration](docs/configuration.md), [results](docs/results-schema.md), [transformations](docs/transformations.md), [experiments](docs/experiments.md), and [provenance](docs/provenance.md).
 

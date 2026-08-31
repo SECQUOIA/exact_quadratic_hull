@@ -1,22 +1,26 @@
 [experiment]
 benchmark = "random_quadratic"
-base_seed = 20250603
-time_limit = 3600
+base_seed = 20250607
+time_limit = 60
 modes = ["solve", "root", "relaxation"]
-root_time_limit = 600
-relaxation_time_limit = 600
+root_time_limit = 30
+relaxation_time_limit = 30
 
 [instances]
-n_dimensions = [2, 3, 4, 5]
-n_disjunctions = [1, 2, 3, 4, 5]
+n_dimensions = 3
+n_disjunctions = 2
 n_disjuncts_per_disjunction = 3
-n_constraints_per_disjunct = [1, 2, 3, 4, 5]
+n_constraints_per_disjunct = 1
 n_feasible_regions = 2
-ensure_positive_definite = false
+ensure_positive_definite = true
 
 [[strategies]]
 name = "gdp.bigm"
 label = "bigm"
+
+[[strategies]]
+name = "gdp.mbigm"
+label = "mbigm"
 
 [[strategies]]
 name = "gdp.binary_multiplication"
@@ -25,10 +29,16 @@ label = "binmult"
 [[strategies]]
 name = "gdp.hull"
 label = "hull"
+[strategies.options]
+EPS = 1e-4
 
 [[strategies]]
 name = "gdp.hull_exact"
 label = "GEHR"
+
+[[strategies]]
+name = "gdp.hull_exact_conic_no_cholesky"
+label = "CEHR"
 
 [[solvers]]
 name = "gams"
@@ -37,3 +47,8 @@ subsolver = "gurobi"
 [[solvers]]
 name = "gams"
 subsolver = "scip"
+
+[[solvers]]
+name = "gams"
+subsolver = "scip"
+variant = "convex"

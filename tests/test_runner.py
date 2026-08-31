@@ -1,21 +1,33 @@
 from __future__ import annotations
 
 import json
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from pathlib import Path
 from types import SimpleNamespace
 
 import pandas as pd
 import pytest
-from pyomo.environ import Binary, ConcreteModel, Objective, Var, maximize
+from pyomo.environ import (
+    Binary,
+    BooleanVar,
+    ConcreteModel,
+    Constraint,
+    LogicalConstraint,
+    Objective,
+    Var,
+    maximize,
+)
+from pyomo.gdp import Disjunct, Disjunction
 from pyomo.opt import SolverResults, SolverStatus, TerminationCondition
 
+from exact_hull.analysis.verify import verify_record, verify_run
 from exact_hull.cli import main
 from exact_hull.experiment import runner
 from exact_hull.experiment.results import (
     RunRecord,
     is_valid_result,
     read_campaign,
+    write_json_atomic,
     write_record_atomic,
 )
 from exact_hull.experiment.runner import Job
@@ -174,6 +186,100 @@ def test_solver_status_failure_retains_solver_message(tmp_path, monkeypatch):
     assert record.error == "license checkout failed"
 
 
+def test_run_job_synchronizes_and_serializes_boolean_values(tmp_path, monkeypatch):
+    class BooleanBenchmark:
+        @staticmethod
+        def build(case):
+            model = ConcreteModel()
+            model.x = Var(bounds=(0, 1), initialize=0)
+            model.b = BooleanVar()
+            model.logical = LogicalConstraint(expr=model.b)
+            model.objective = Objective(expr=model.x)
+            return model
+
+        @staticmethod
+        def solution(model):
+            return {}
+
+    result = SimpleNamespace(
+        solver=SimpleNamespace(
+            status=SolverStatus.ok,
+            termination_condition=TerminationCondition.optimal,
+            user_time=1.0,
+        ),
+        problem=SimpleNamespace(
+            lower_bound=0.0,
+            upper_bound=0.0,
+            number_of_variables=2,
+            number_of_constraints=1,
+            number_of_nonzeros=1,
+            number_of_integer_variables=1,
+        ),
+        solution=None,
+    )
+
+    class Solver:
+        @staticmethod
+        def solve(model, **kwargs):
+            model.b.get_associated_binary().set_value(1)
+            return result
+
+    monkeypatch.setitem(runner.BENCHMARKS, "kmeans", BooleanBenchmark())
+    monkeypatch.setattr(runner, "SolverFactory", lambda name: Solver())
+    record = runner.run_job(_job(), tmp_path, versions={})
+    assert record.solution["booleans"] == {"b": True}
+    assert verify_record(record)["verification_status"] == "verified_feasible"
+
+
+def test_fractional_boolean_sync_does_not_discard_numeric_payload(tmp_path, monkeypatch):
+    class FractionalBenchmark:
+        @staticmethod
+        def build(case):
+            model = ConcreteModel()
+            model.x = Var(bounds=(0, 1), initialize=0)
+            model.d = Disjunct([1, 2])
+            model.d[1].constraint = Constraint(expr=model.x >= 0)
+            model.d[2].constraint = Constraint(expr=model.x <= 1)
+            model.choice = Disjunction(expr=list(model.d.values()))
+            model.objective = Objective(expr=model.x)
+            return model
+
+        @staticmethod
+        def solution(model):
+            return {}
+
+    result = SimpleNamespace(
+        solver=SimpleNamespace(
+            status=SolverStatus.ok,
+            termination_condition=TerminationCondition.optimal,
+            user_time=1.0,
+        ),
+        problem=SimpleNamespace(
+            lower_bound=0.0,
+            upper_bound=0.0,
+            number_of_variables=4,
+            number_of_constraints=3,
+            number_of_nonzeros=3,
+            number_of_integer_variables=2,
+        ),
+        solution=None,
+    )
+
+    class Solver:
+        @staticmethod
+        def solve(model, **kwargs):
+            for disjunct in model.d.values():
+                disjunct.binary_indicator_var.set_value(0.5, skip_validation=True)
+            return result
+
+    monkeypatch.setitem(runner.BENCHMARKS, "kmeans", FractionalBenchmark())
+    monkeypatch.setattr(runner, "SolverFactory", lambda name: Solver())
+    record = runner.run_job(_job(), tmp_path, versions={})
+    assert record.solution["variables"] == {"x": 0.0}
+    assert set(record.solution["indicators"].values()) == {0.5}
+    assert verify_record(record)["verification_status"] == "fractional_indicators"
+
+
 def test_real_gams_status_combinations_are_classified_safely():
     result = SimpleNamespace(
         solver=SimpleNamespace(
@@ -186,6 +292,9 @@ def test_real_gams_status_combinations_are_classified_safely():
     assert runner._status(result, "", "gurobi", 10, 1, 2, None) == "optimal"
     assert runner._status(result, "", "gurobi", 10, 10, 11, None) == "timeout"
     assert runner._status(result, "", "gurobi", 10, 10, 11, 0) == "optimal"
+    assert runner._status(result, "", "gurobi", 10, 1, 2, 5e-7, "root") == "optimal"
+    result.solver.status = SolverStatus.unknown
+    assert runner._status(result, "", "gurobi", 10, 1, 2, None) == "solver_error"
     result.solver.status = SolverStatus.aborted
     result.solver.termination_condition = TerminationCondition.licensingProblems
     result.solver.message = "license checkout failed"
@@ -204,8 +313,9 @@ def test_real_gams_status_combinations_are_classified_safely():
         runner._status(result, "Node limit reached", "gurobi", 10, 1, 2, None, "root", None)
         == "node_limit"
     )
-    assert runner._status(result, "", "gurobi", 10, 1, 2, 0.1, "root", -1.0) == "solver_error"
-    assert runner._status(result, "", "gurobi", 10, 1, 2, 0, "root", -1.0) == "optimal"
+    assert runner._status(result, "", "gurobi", 10, 1, 2, 0.1, "root", -1.0) == "feasible"
+    assert runner._status(result, "", "gurobi", 10, 1, 2, 0, "root", -1.0) == "feasible"
+    assert runner._status(result, "", "gurobi", 10, 1, 2, 5e-7, "root", -1.0) == "feasible"
     assert (
         runner._status(
             result, "Time limit reached\nNode limit reached", "gurobi", 10, 1, 2, 0.1, "root"
@@ -246,6 +356,156 @@ def test_nonfinite_pyomo_bounds_are_missing():
     assert runner._as_float(float("nan")) is None
     assert runner._as_bound(1e20) is None
     assert runner._as_bound(-1e19) is None
+
+
+def test_gams_banner_version_parser_is_stable():
+    banner = "--- Job -version Start 08/30/26 22:30:58 54.3.1 x86 64bit/Linux"
+    assert runner._parse_gams_version(banner) == "54.3.1"
+    assert runner._parse_gams_version("probe failed") is None
+
+
+@pytest.mark.parametrize(
+    ("status", "termination", "lower", "upper", "expected"),
+    [
+        (SolverStatus.ok, TerminationCondition.infeasible, None, None,
+         TerminationCondition.infeasible),
+        (SolverStatus.warning, TerminationCondition.infeasible, None, None,
+         TerminationCondition.error),
+        (SolverStatus.ok, TerminationCondition.feasible, 1.0, 1.0,
+         TerminationCondition.optimal),
+        (SolverStatus.warning, TerminationCondition.feasible, 1.0, 1.0,
+         TerminationCondition.error),
+    ],
+)
+def test_mbigm_adapter_only_trusts_clean_solver_results(
+    monkeypatch, status, termination, lower, upper, expected
+):
+    model = ConcreteModel()
+    model.x = Var(bounds=(-1, 1), initialize=0)
+    model.constraint = Constraint(expr=model.x >= -1)
+    model.objective = Objective(expr=model.x)
+    result = SolverResults()
+    result.solver.status = status
+    result.solver.termination_condition = termination
+    result.problem.lower_bound = lower
+    result.problem.upper_bound = upper
+    captured = {}
+
+    class Solver:
+        @staticmethod
+        def solve(*args, **kwargs):
+            captured.update(kwargs)
+            return result
+
+    monkeypatch.setattr(runner, "SolverFactory", lambda name: Solver())
+    adapter = runner._GamsMbigmSolver()
+    returned = adapter.solve(model)
+    assert returned.solver.termination_condition == expected
+    assert adapter.m_estimation_subsolves == 1
+    assert any("reslim=30" in option for option in captured["add_options"])
+    assert "DualReductions 0" in captured["add_options"]
+
+
+def test_mbigm_cache_is_reused_and_transform_times_are_recorded(tmp_path, monkeypatch):
+    def model():
+        from pyomo.gdp import Disjunct, Disjunction
+
+        instance = ConcreteModel()
+        instance.x = Var(bounds=(-2, 2))
+        instance.y = Var(bounds=(-2, 2))
+        instance.d = Disjunct([1, 2])
+        instance.d[1].constraint = Constraint(expr=instance.x + instance.y <= 1)
+        instance.d[2].constraint = Constraint(expr=instance.x - instance.y <= 1)
+        instance.choice = Disjunction(expr=list(instance.d.values()))
+        instance.objective = Objective(expr=instance.x)
+        return instance
+
+    cache = tmp_path / "mbigm" / "instance.json"
+    options = next(
+        strategy["options"]
+        for strategy in runner.load_config(
+            Path(__file__).parents[1] / "configs" / "qualification.toml"
+        )["strategies"]
+        if strategy["name"] == "gdp.mbigm"
+    )
+
+    class Solver:
+        @staticmethod
+        def solve(*args, **kwargs):
+            result = SolverResults()
+            result.solver.status = SolverStatus.ok
+            result.solver.termination_condition = TerminationCondition.optimal
+            result.problem.lower_bound = 0.0
+            result.problem.upper_bound = 0.0
+            return result
+
+    monkeypatch.setattr(runner, "SolverFactory", lambda name: Solver())
+    first = model()
+    first_counts, *_ = runner.transform_model(
+        first, "gdp.mbigm", options, "solve", mbigm_cache_path=cache
+    )
+    assert cache.exists()
+    assert first._exact_hull_transform_stats["m_estimation_subsolves"] > 0
+    cache_payload = json.loads(cache.read_text())
+    assert all(
+        not row["constraint"].startswith(f"{row['disjunct']}.")
+        for row in cache_payload["values"]
+    )
+    second = model()
+    second_counts, *_ = runner.transform_model(
+        second, "gdp.mbigm", options, "solve", mbigm_cache_path=cache
+    )
+    assert first._exact_hull_transform_stats["transform_sec"] > 0
+    assert second._exact_hull_transform_stats["m_estimation_subsolves"] == 0
+    assert first_counts == second_counts
+    assert sum(1 for _ in first.component_data_objects(Var)) == sum(
+        1 for _ in second.component_data_objects(Var)
+    )
+    assert sum(1 for _ in first.component_data_objects(Constraint, active=True)) == sum(
+        1 for _ in second.component_data_objects(Constraint, active=True)
+    )
+    assert sorted(
+        str(constraint.expr)
+        for constraint in first.component_data_objects(Constraint, active=True)
+    ) == sorted(
+        str(constraint.expr)
+        for constraint in second.component_data_objects(Constraint, active=True)
+    )
+
+    payload = json.loads(cache.read_text())
+    payload["values"].pop()
+    write_json_atomic(payload, cache)
+    truncated = model()
+    runner.transform_model(
+        truncated, "gdp.mbigm", options, "solve", mbigm_cache_path=cache
+    )
+    assert truncated._exact_hull_transform_stats["m_estimation_subsolves"] > 0
+
+    mismatched = dict(options, use_primal_bound=not options["use_primal_bound"])
+    with pytest.raises(ValueError, match="different mbigm options"):
+        runner.transform_model(
+            model(), "gdp.mbigm", mismatched, "solve", mbigm_cache_path=cache
+        )
+
+
+def test_mbigm_cache_race_accepts_a_different_same_options_m_set(tmp_path):
+    path = tmp_path / "mbigm.json"
+    first = {"options_fingerprint": "same", "values": [{"value": [1, 2]}]}
+    second = {"options_fingerprint": "same", "values": [{"value": [3, 4]}]}
+    runner._write_mbigm_cache(path, first)
+    runner._write_mbigm_cache(path, second)
+    assert json.loads(path.read_text()) == first
+
+
+def test_mbigm_options_fingerprint_includes_estimator_identity():
+    base = {"reduce_bound_constraints": True}
+    gurobi = runner._mbigm_options_fingerprint({**base, "solver": "gurobi"})
+    scip = runner._mbigm_options_fingerprint({**base, "solver": "scip"})
+    adapter = runner._mbigm_options_fingerprint(
+        {**base, "solver": runner._GamsMbigmSolver()}
+    )
+    assert gurobi != scip
+    assert adapter == gurobi
 
 
 def test_non_minimization_objective_is_a_build_error(tmp_path, monkeypatch):
@@ -396,6 +656,64 @@ def test_resume_reruns_invalid_or_mismatched_result(tmp_path, monkeypatch, bad_p
     assert is_valid_result(destination, job.run_id)
 
 
+def test_resume_reruns_only_requested_status(tmp_path, monkeypatch):
+    config = Path(__file__).parents[1] / "configs" / "smoke.toml"
+    normalized = runner.load_config(config)
+    job = runner.expand_jobs(normalized)[0]
+    runner._prepare_manifest(tmp_path, runner.build_manifest(normalized, [job]), resume=False)
+    destination = tmp_path / "jobs" / job.run_id / "result.json"
+    write_record_atomic(_record_for_job(job, status="solver_error"), destination)
+    calls = []
+
+    def replacement(planned_job, output_directory, versions):
+        calls.append(planned_job.run_id)
+        return _record_for_job(planned_job)
+
+    monkeypatch.setattr(runner, "run_job", replacement)
+    runner.run(config, tmp_path, resume=True, rerun_statuses={"solver_error"})
+    assert calls == [job.run_id]
+
+
+def test_shard_filters_full_plan_before_limit(tmp_path, monkeypatch):
+    config = tmp_path / "shards.toml"
+    config.write_text(
+        """
+[experiment]
+benchmark = "kmeans"
+[instances]
+n_dimensions = 2
+n_clusters = 2
+n_points = [3, 4, 5, 6, 7]
+[[strategies]]
+name = "gdp.hull_exact"
+[[solvers]]
+subsolver = "scip"
+"""
+    )
+    planned = runner.expand_jobs(runner.load_config(config))
+    calls = []
+    monkeypatch.setattr(
+        runner,
+        "run_job",
+        lambda job, output_directory, versions: calls.append(job.run_id)
+        or _record_for_job(job),
+    )
+    runner.run(config, tmp_path / "run", shard=(2, 3), limit=1)
+    assert calls == [planned[1].run_id]
+    manifest = json.loads((tmp_path / "run" / "manifest.json").read_text())
+    assert len(manifest["planned_jobs"]) == 5
+
+
+def test_strict_resume_environment_mismatch_is_an_error(tmp_path):
+    config = runner.load_config(Path(__file__).parents[1] / "configs" / "smoke.toml")
+    jobs = runner.expand_jobs(config)
+    manifest = runner.build_manifest(config, jobs, versions={"python": "old"})
+    runner._prepare_manifest(tmp_path, manifest, resume=False)
+    current = runner.build_manifest(config, jobs, versions={"python": "new"})
+    with pytest.raises(ValueError, match="Resume environment differs"):
+        runner._prepare_manifest(tmp_path, current, resume=True, strict_env=True)
+
+
 def test_limited_run_can_resume_full_plan(tmp_path, monkeypatch):
     config = Path(__file__).parents[1] / "configs" / "smoke.toml"
     runner.run(config, tmp_path, limit=0)
@@ -443,7 +761,110 @@ def test_report_writes_detail_and_summary_outputs(tmp_path):
     assert main(["report", str(tmp_path)]) == 0
     assert (tmp_path / "results.csv").exists()
     assert (tmp_path / "summary.csv").exists()
+    assert (tmp_path / "methods.csv").exists()
     assert (tmp_path / "bounds.csv").exists()
+    assert pd.read_csv(tmp_path / "methods.csv")["planned_denominator"].iloc[0] == 1
+
+
+def test_verification_reuses_unchanged_rows_and_adds_or_replaces_results(
+    tmp_path, monkeypatch
+):
+    config = runner.load_config(Path(__file__).parents[1] / "configs" / "smoke.toml")
+    first_job = runner.expand_jobs(config)[0]
+    second_job = replace(first_job, run_id="second")
+    runner._prepare_manifest(
+        tmp_path, runner.build_manifest(config, [first_job, second_job]), resume=False
+    )
+    first = _record_for_job(first_job)
+    first.timestamp = "first-v1"
+    write_record_atomic(first, tmp_path / "jobs" / first.run_id / "result.json")
+    verify_run(tmp_path)
+
+    second = _record_for_job(second_job)
+    second.timestamp = "second-v1"
+    write_record_atomic(second, tmp_path / "jobs" / second.run_id / "result.json")
+    calls = []
+    original = verify_record
+
+    def counted(record, tolerance=1e-5, model=None):
+        calls.append(record.run_id)
+        return original(record, tolerance, model)
+
+    monkeypatch.setattr("exact_hull.analysis.verify.verify_record", counted)
+    rows = verify_run(tmp_path)
+    assert calls == ["second"]
+    assert {row["run_id"] for row in rows} == {first.run_id, second.run_id}
+
+    calls.clear()
+    first.timestamp = "first-v2"
+    write_record_atomic(first, tmp_path / "jobs" / first.run_id / "result.json")
+    verify_run(tmp_path)
+    assert calls == [first.run_id]
+
+
+def test_plot_incrementally_reverifies_rerun_records(tmp_path, monkeypatch):
+    from exact_hull.analysis.plots import plot_run
+
+    config = runner.load_config(Path(__file__).parents[1] / "configs" / "smoke.toml")
+    job = runner.expand_jobs(config)[0]
+    runner._prepare_manifest(tmp_path, runner.build_manifest(config, [job]), resume=False)
+    record = _record_for_job(job)
+    record.timestamp = "first-v1"
+    write_record_atomic(record, tmp_path / "jobs" / record.run_id / "result.json")
+    verify_run(tmp_path)
+
+    record.timestamp = "first-v2"
+    write_record_atomic(record, tmp_path / "jobs" / record.run_id / "result.json")
+    calls = []
+    original = verify_record
+
+    def counted(current, tolerance=1e-5, model=None):
+        calls.append((current.run_id, tolerance))
+        return original(current, tolerance, model)
+
+    monkeypatch.setattr("exact_hull.analysis.verify.verify_record", counted)
+    assert plot_run(tmp_path, tolerance=2e-5)
+    assert calls == [(record.run_id, 2e-5)]
+    verification = pd.read_csv(tmp_path / "verification.csv")
+    assert verification["record_timestamp"].tolist() == ["first-v2"]
+    assert verification["verification_tolerance"].tolist() == [2e-5]
+
+
+def test_report_and_reference_forward_verification_tolerance(tmp_path, monkeypatch):
+    config = runner.load_config(Path(__file__).parents[1] / "configs" / "smoke.toml")
+    job = runner.expand_jobs(config)[0]
+    runner._prepare_manifest(tmp_path, runner.build_manifest(config, [job]), resume=False)
+    write_record_atomic(
+        _record_for_job(job), tmp_path / "jobs" / job.run_id / "result.json"
+    )
+    captured = {}
+    original = verify_run
+
+    def verify_with_tolerance(path, tolerance=1e-5, reverify=False):
+        captured["report"] = tolerance
+        return original(path, tolerance=tolerance, reverify=reverify)
+
+    monkeypatch.setattr("exact_hull.analysis.verify.verify_run", verify_with_tolerance)
+    assert main(["report", str(tmp_path), "--tolerance", "2e-5"]) == 0
+    assert captured["report"] == 2e-5
+
+    def reference_with_tolerance(path, cap=4096, reverify=False, tolerance=1e-5):
+        captured["reference"] = tolerance
+        return {}
+
+    monkeypatch.setattr(
+        "exact_hull.analysis.references.derive_references", reference_with_tolerance
+    )
+    assert main(["reference", str(tmp_path), "--tolerance", "3e-5"]) == 0
+    assert captured["reference"] == 3e-5
+
+    def plot_with_tolerance(path, mode="solve", tolerance=1e-5):
+        captured["plot"] = tolerance
+        return []
+
+    monkeypatch.setattr("exact_hull.analysis.plots.plot_run", plot_with_tolerance)
+    assert main(["plot", str(tmp_path), "--tolerance", "4e-5"]) == 0
+    assert captured["plot"] == 4e-5
 
 
 def test_bad_typed_record_is_skipped_and_rerun_on_resume(tmp_path, monkeypatch):
@@ -454,7 +875,7 @@ def test_bad_typed_record_is_skipped_and_rerun_on_resume(tmp_path, monkeypatch):
     destination = tmp_path / "jobs" / job.run_id / "result.json"
     payload = asdict(_record_for_job(job))
     payload["objective"] = "not-a-number"
-    runner.write_json_atomic(payload, destination)
+    write_json_atomic(payload, destination)
 
     with pytest.warns(UserWarning, match="Skipped 1 invalid"):
         assert read_campaign(tmp_path)[1] == []
@@ -481,7 +902,7 @@ def test_record_identity_mismatch_is_skipped(tmp_path):
 
 
 def test_malformed_manifest_has_clear_error(tmp_path):
-    runner.write_json_atomic({"config": {}, "instances": []}, tmp_path / "manifest.json")
+    write_json_atomic({"config": {}, "instances": []}, tmp_path / "manifest.json")
     with pytest.raises(ValueError, match="Invalid campaign manifest.*planned_jobs"):
         read_campaign(tmp_path)
 
@@ -502,6 +923,27 @@ def test_negative_limit_is_rejected_by_argparse(tmp_path):
     config = Path(__file__).parents[1] / "configs" / "smoke.toml"
     with pytest.raises(SystemExit) as error:
         main(["run", str(config), "--dry-run", "--limit", "-1"])
+    assert error.value.code == 2
+
+
+@pytest.mark.parametrize("command", ["verify", "report", "reference", "plot"])
+@pytest.mark.parametrize("tolerance", ["0", "-1", "nan", "inf"])
+def test_verification_cli_rejects_nonpositive_or_nonfinite_tolerance(
+    command, tolerance
+):
+    with pytest.raises(SystemExit) as error:
+        main([command, "unused", "--tolerance", tolerance])
+    assert error.value.code == 2
+
+
+@pytest.mark.parametrize("option", ["--rerun-status", "--strict-env"])
+def test_resume_only_options_use_argparse_error(option):
+    config = Path(__file__).parents[1] / "configs" / "smoke.toml"
+    arguments = ["run", str(config), "--dry-run", option]
+    if option == "--rerun-status":
+        arguments.append("solver_error")
+    with pytest.raises(SystemExit) as error:
+        main(arguments)
     assert error.value.code == 2
 
 

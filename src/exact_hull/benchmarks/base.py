@@ -43,11 +43,33 @@ def grid_rows(config: dict[str, Any]) -> list[dict[str, Any]]:
     return rows
 
 
-def stable_seed(base_seed: int, params: dict[str, Any]) -> int:
-    """Derive a stable per-instance seed without Python's randomized hash."""
+def instance_digest(benchmark: str, base_seed: int, params: dict[str, Any]) -> bytes:
+    """Hash the normalized content that defines a benchmark instance."""
     import hashlib
     import json
 
     payload = json.dumps(params, sort_keys=True, separators=(",", ":"))
-    digest = hashlib.sha256(f"{base_seed}:{payload}".encode()).digest()
-    return int.from_bytes(digest[:8], "big")
+    return hashlib.sha256(f"{benchmark}:{base_seed}:{payload}".encode()).digest()
+
+
+def stable_seed(base_seed: int, params: dict[str, Any], benchmark: str = "") -> int:
+    """Derive a stable per-instance seed without Python's randomized hash."""
+    return int.from_bytes(instance_digest(benchmark, base_seed, params)[:8], "big")
+
+
+def content_instance_id(prefix: str, benchmark: str, base_seed: int, params: dict[str, Any]) -> str:
+    """Return a short human-readable, content-addressed instance identifier."""
+    return f"{prefix}-{instance_digest(benchmark, base_seed, params).hex()[:12]}"
+
+
+def validate_case_ids(cases: list[BenchmarkCase]) -> list[BenchmarkCase]:
+    """Reject the vanishingly unlikely case of a truncated-digest collision."""
+    seen: dict[str, tuple[dict[str, Any], int]] = {}
+    for case in cases:
+        content = (case.params, case.seed)
+        previous = seen.setdefault(case.instance_id, content)
+        if previous != content:
+            raise ValueError(
+                f"Instance id collision for {case.instance_id}: {previous[0]} and {case.params}"
+            )
+    return cases

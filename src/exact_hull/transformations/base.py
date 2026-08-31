@@ -14,6 +14,19 @@ from pyomo.gdp.util import clone_without_expression_components
 logger = logging.getLogger("pyomo.gdp.hull")
 
 
+def increment_path_count(model, name: str, amount: int = 1) -> None:
+    counts = getattr(model, "_exact_hull_path_counts", None)
+    if counts is None:
+        counts = {
+            "n_cone_rows": 0,
+            "n_fallback_rows": 0,
+            "n_equality_fallback_rows": 0,
+            "n_epigraph_vars": 0,
+        }
+        model._exact_hull_path_counts = counts
+    counts[name] += amount
+
+
 class ExactHullBase(Hull_Reformulation):
     """Pyomo hull transformation with an exact-quadratic emitter hook."""
 

@@ -15,6 +15,14 @@ n_feasible_regions = 10
 ensure_positive_definite = true
 
 [[strategies]]
+name = "gdp.bigm"
+label = "bigm"
+
+[[strategies]]
+name = "gdp.binary_multiplication"
+label = "binmult"
+
+[[strategies]]
 name = "gdp.hull"
 label = "hull"
 [strategies.options]
@@ -24,10 +32,24 @@ EPS = 1e-4
 name = "gdp.hull_exact"
 label = "GEHR"
 
+[[strategies]]
+name = "gdp.hull_exact_conic_no_cholesky"
+label = "CEHR"
+
 [[solvers]]
 name = "gams"
 subsolver = "gurobi"
 
 [[solvers]]
 name = "gams"
+subsolver = "gurobi"
+variant = "auto"
+
+[[solvers]]
+name = "gams"
 subsolver = "scip"
+
+[[solvers]]
+name = "gams"
+subsolver = "scip"
+variant = "convex"

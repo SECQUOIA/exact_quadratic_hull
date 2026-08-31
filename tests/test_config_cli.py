@@ -17,22 +17,22 @@ ROOT = Path(__file__).parents[1]
 def test_all_configs_load_and_expected_case_counts():
     expected = {
         "random_psd.toml": 240,
-        "random_psd_conic.toml": 240,
+        "random_psd_conic.toml": 18,
         "random_nonconvex.toml": 100,
         "eps_relaxation.toml": 240,
         "kmeans.toml": 96,
         "clay.toml": 12,
         "cstr.toml": 9,
         "smoke.toml": 1,
+        "qualification.toml": 1,
     }
     for path in (ROOT / "configs").glob("*.toml"):
         jobs = expand_jobs(load_config(path))
         assert len({job.instance_id for job in jobs}) == expected[path.name]
 
 
-@pytest.mark.parametrize("name", ["random_psd.toml", "random_psd_conic.toml"])
-def test_random_psd_uses_design_of_record_axes(name):
-    config = load_config(ROOT / "configs" / name)
+def test_random_psd_uses_design_of_record_axes():
+    config = load_config(ROOT / "configs" / "random_psd.toml")
     instances = config["instances"]
     assert instances["n_dimensions"] == [3, 4, 5, 6, 7]
     assert instances["n_disjunctions"] == [3, 4, 5, 6, 7, 8, 9, 10]
@@ -40,6 +40,38 @@ def test_random_psd_uses_design_of_record_axes(name):
     assert instances["n_constraints_per_disjunct"] == 10
     assert instances["n_feasible_regions"] == 10
     assert instances["ensure_positive_definite"] is True
+
+
+def test_conic_encoding_ablation_uses_diagnostic_subset():
+    config = load_config(ROOT / "configs" / "random_psd_conic.toml")
+    assert config["instances"]["n_dimensions"] == [3, 5, 7]
+    assert config["instances"]["n_disjunctions"] == [3, 6, 10]
+    assert config["instances"]["n_disjuncts_per_disjunction"] == [10, 15]
+    assert config["experiment"]["modes"] == ["solve", "relaxation"]
+
+
+def test_main_campaign_strategy_and_solver_matrix():
+    random_psd = load_config(ROOT / "configs" / "random_psd.toml")
+    assert {item["label"] for item in random_psd["strategies"]} == {
+        "bigm",
+        "binmult",
+        "hull",
+        "GEHR",
+        "CEHR",
+    }
+    assert {(item["subsolver"], item["variant"]) for item in random_psd["solvers"]} == {
+        ("gurobi", None),
+        ("gurobi", "auto"),
+        ("scip", None),
+        ("scip", "convex"),
+    }
+    assert {item["name"] for item in load_config(ROOT / "configs" / "cstr.toml")["solvers"]} == {
+        "gams"
+    }
+    assert all(
+        item["variant"] is None
+        for item in load_config(ROOT / "configs" / "cstr.toml")["solvers"]
+    )
 
 
 def test_unknown_transformation_fails_at_load(tmp_path):

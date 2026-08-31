@@ -1,5 +1,7 @@
 SCIP             54.3.1 61154be4 Aug 21, 2026          LEG x86 64bit/Linux
 SCIP version 10.0.3 (d409edf9f6)
+presolved problem has 72 variables (12 bin, 0 int, 60 cont) and 41 constraints
+  7 constraints of type <nonlinear>
 Copyright (c) 2002-2026 Zuse Institute Berlin (ZIB)
 SCIP Status        : solving was interrupted [node limit reached]
 Solving Time (sec) : 3.82

@@ -61,6 +61,7 @@ class RunRecord:
     duration_sec: float | None
     solver_time_sec: float | None
     status: RunStatus
+    transform_sec: float | None = None
     objective: float | None = None
     lower_bound: float | None = None
     upper_bound: float | None = None
@@ -70,6 +71,24 @@ class RunRecord:
     num_constraints: int | None = None
     num_nonzeros: int | None = None
     num_discrete_variables: int | None = None
+    presolved_num_variables: int | None = None
+    presolved_num_constraints: int | None = None
+    presolved_num_nonzeros: int | None = None
+    presolved_num_soc: int | None = None
+    presolved_num_bilinear: int | None = None
+    presolved_num_quadratic: int | None = None
+    presolved_num_nonlinear: int | None = None
+    n_cone_rows: int | None = None
+    n_fallback_rows: int | None = None
+    n_equality_fallback_rows: int | None = None
+    n_epigraph_vars: int | None = None
+    n_quadratic_terms: int | None = None
+    n_bilinear_binary_terms: int | None = None
+    n_binary_square_terms: int | None = None
+    n_disaggregated_vars: int | None = None
+    n_nonlinear_constraints: int | None = None
+    m_estimation_time_sec: float | None = None
+    m_estimation_subsolves: int | None = None
     solver_status: str | None = None
     termination: str | None = None
     solution: dict[str, Any] = field(default_factory=dict)
@@ -113,7 +132,14 @@ class RunRecord:
         if isinstance(record.seed, bool) or not isinstance(record.seed, int):
             raise TypeError("Run record seed must be an integer")
         _validate_number("time_limit", record.time_limit, optional=False, nonnegative=True)
-        for name in ("duration_sec", "solver_time_sec", "abs_gap", "rel_gap"):
+        for name in (
+            "duration_sec",
+            "solver_time_sec",
+            "transform_sec",
+            "m_estimation_time_sec",
+            "abs_gap",
+            "rel_gap",
+        ):
             _validate_number(name, getattr(record, name), optional=True, nonnegative=True)
         for name in ("objective", "lower_bound", "upper_bound"):
             _validate_number(name, getattr(record, name), optional=True)
@@ -122,6 +148,23 @@ class RunRecord:
             "num_constraints",
             "num_nonzeros",
             "num_discrete_variables",
+            "presolved_num_variables",
+            "presolved_num_constraints",
+            "presolved_num_nonzeros",
+            "presolved_num_soc",
+            "presolved_num_bilinear",
+            "presolved_num_quadratic",
+            "presolved_num_nonlinear",
+            "n_cone_rows",
+            "n_fallback_rows",
+            "n_equality_fallback_rows",
+            "n_epigraph_vars",
+            "n_quadratic_terms",
+            "n_bilinear_binary_terms",
+            "n_binary_square_terms",
+            "n_disaggregated_vars",
+            "n_nonlinear_constraints",
+            "m_estimation_subsolves",
         ):
             value = getattr(record, name)
             if value is not None and (
@@ -280,26 +323,51 @@ def read_campaign(run_directory: Path) -> tuple[dict[str, Any], list[RunRecord]]
 
 
 def aggregate(
-    run_directory: Path, xlsx: bool = False, records: list[RunRecord] | None = None
+    run_directory: Path,
+    xlsx: bool = False,
+    records: list[RunRecord] | None = None,
+    references: dict | None = None,
+    verification: dict[str, str] | None = None,
 ) -> Path:
-    from exact_hull.analysis.outcomes import ground_truth, is_correct
+    from exact_hull.analysis.outcomes import (
+        correctness,
+        ground_truth_with_sources,
+        invalid_certificate,
+        reference_values,
+    )
 
     if records is None:
         _, records = read_campaign(run_directory)
-    truth = ground_truth(records)
+    truth, truth_sources = ground_truth_with_sources(records, references)
+    certified_truth = reference_values(references)
     rows = []
     for record in records:
         row = asdict(record)
         row["ground_truth"] = truth.get(record.instance_id)
         row["correct"] = (
-            record.mode == "solve"
-            and record.status in VERIFIED_OPTIMAL_STATUSES
-            and is_correct(record.objective, row["ground_truth"])
+            correctness(record, truth, verification)
+            if record.mode == "solve"
+            else None
         )
+        row["ground_truth_source"] = truth_sources.get(record.instance_id, "unknown")
+        row["verification_status"] = (
+            verification.get(record.run_id) if verification is not None else None
+        )
+        row["invalid_certificate"] = invalid_certificate(
+            record, reference_truth=certified_truth
+        )
+        row["negative_control"] = record.variant == "convex"
         for field_name in ("instance_params", "transformation_options", "solution", "versions"):
             row[field_name] = json.dumps(row[field_name], sort_keys=True)
         rows.append(row)
-    columns = [field.name for field in fields(RunRecord)] + ["ground_truth", "correct"]
+    columns = [field.name for field in fields(RunRecord)] + [
+        "ground_truth",
+        "ground_truth_source",
+        "correct",
+        "verification_status",
+        "invalid_certificate",
+        "negative_control",
+    ]
     frame = pd.DataFrame(rows, columns=columns)
     destination = run_directory / ("results.xlsx" if xlsx else "results.csv")
     if xlsx:

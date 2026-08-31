@@ -4,10 +4,10 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from exact_hull.analysis.outcomes import ground_truth, is_correct
+from exact_hull.analysis.outcomes import correctness, ground_truth, invalid_certificate, is_correct
 from exact_hull.analysis.plots import performance_frames, style_map
-from exact_hull.analysis.profiles import dolan_more
-from exact_hull.analysis.tables import bounds, summary
+from exact_hull.analysis.profiles import dolan_more, shifted_geometric_mean
+from exact_hull.analysis.tables import bounds, censoring, methods, summary
 from exact_hull.experiment.results import (
     RunRecord,
     read_campaign,
@@ -50,6 +50,12 @@ def test_timed_out_low_objective_cannot_poison_ground_truth():
     assert truth == {"i": 5}
 
 
+def test_convex_variant_is_excluded_from_population_ground_truth():
+    assert ground_truth([record(variant="convex", objective=-10), record(objective=5)]) == {
+        "i": 5
+    }
+
+
 def test_nonfinite_objective_cannot_be_ground_truth():
     assert ground_truth([record(objective=float("nan")), record(objective=float("inf"))]) == {}
 
@@ -62,7 +68,10 @@ def test_non_solve_modes_are_excluded_from_ground_truth_summary_and_profiles():
     ]
     assert ground_truth(records) == {"i": 5}
     assert summary(records)["jobs"].sum() == 1
-    frame = performance_frames(records)[("gams", "scip", None)]
+    references = {"i": {"status": "certified", "objective": 5}}
+    frame = performance_frames(
+        records, references=references, verification={"solve": "verified_feasible"}
+    )[("gams", "scip", None)]
     assert frame.at["i", "s"] == 1
 
 
@@ -147,6 +156,53 @@ def test_uncertified_relaxations_are_not_compared_and_incomplete_roots_have_no_g
     incomplete = table.loc[table["strategy"] == "incomplete"].iloc[0]
     assert pd.isna(gehr["relaxation_matches_cehr"])
     assert pd.isna(incomplete["root_gap"])
+    assert pd.isna(gehr["relaxation_gap"])
+
+
+def test_feasible_root_bound_is_retained_and_censoring_reasons_are_reported():
+    records = [
+        record(run_id="solve", objective=5),
+        record(run_id="root", mode="root", status="feasible", lower_bound=4),
+        record(
+            run_id="relax",
+            mode="relaxation",
+            status="timeout",
+            objective=3,
+            lower_bound=2,
+        ),
+    ]
+    assert bounds(records).iloc[0]["root_gap"] == pytest.approx(0.2)
+    excluded = censoring(records)
+    assert excluded.iloc[0]["reason"] == "unacceptable_status"
+    assert excluded.iloc[0]["excluded"] == 1
+
+
+def test_reference_invalid_certificate_and_root_gap_closed():
+    references = {"i": {"status": "certified", "objective": 5}}
+    bad = record(lower_bound=5.1)
+    assert invalid_certificate(bad, references)
+    records = [
+        record(run_id="solve", objective=5, lower_bound=5),
+        record(
+            run_id="bigm-root",
+            strategy="bigm",
+            transformation="gdp.bigm",
+            mode="root",
+            status="node_limit",
+            objective=None,
+            lower_bound=3,
+        ),
+        record(
+            run_id="gehr-root",
+            mode="root",
+            status="node_limit",
+            objective=None,
+            lower_bound=4,
+        ),
+    ]
+    table = bounds(records, references=references)
+    gehr = table.loc[table["transformation"] == "gdp.hull_exact"].iloc[0]
+    assert gehr["root_gap_closed"] == pytest.approx(0.5)
 
 
 def test_correctness_uses_relative_tolerance_with_absolute_near_zero():
@@ -170,6 +226,41 @@ def test_dolan_more_floors_zero_solver_times():
     np.testing.assert_allclose(profile["b"], [0, 1])
 
 
+def test_shifted_geometric_mean_hand_value_and_timeout_charging():
+    assert shifted_geometric_mean([0, 30], shift=10) == pytest.approx(10)
+    table = methods(
+        [
+            record(run_id="solved", solver_time_sec=0),
+            record(run_id="timeout", status="timeout", solver_time_sec=1, time_limit=30),
+        ],
+        references={"i": {"status": "certified", "objective": 5}},
+        verification={"solved": "verified_feasible", "timeout": "verified_feasible"},
+    )
+    assert table["shifted_geometric_mean_10_sec"].iloc[0] == pytest.approx(10)
+    assert table["planned_denominator"].iloc[0] == 2
+
+
+def test_methods_preserves_unobserved_plan_and_unknown_references():
+    planned = [
+        {
+            "mode": "solve",
+            "label": strategy,
+            "solver": "gams",
+            "subsolver": "scip",
+            "variant": None,
+        }
+        for strategy in ("s", "missing")
+    ]
+    table = methods([record()], planned_jobs=planned)
+    assert set(table["strategy"]) == {"s", "missing"}
+    observed = table.loc[table["strategy"] == "s"].iloc[0]
+    missing = table.loc[table["strategy"] == "missing"].iloc[0]
+    assert observed["unknown_reference_count"] == 1
+    assert observed["solved_count"] == 0
+    assert missing["planned_denominator"] == 1
+    assert pd.isna(missing["shifted_geometric_mean_10_sec"])
+
+
 def test_solver_groups_are_not_merged_and_unsolved_instances_remain_in_denominator():
     records = [
         record(run_id="a1", instance_id="i1", strategy="a", subsolver="gurobi", solver_time_sec=1),
@@ -181,7 +272,15 @@ def test_solver_groups_are_not_merged_and_unsolved_instances_remain_in_denominat
         record(run_id="a4", instance_id="i1", strategy="a", subsolver="scip", solver_time_sec=8),
         record(run_id="b4", instance_id="i1", strategy="b", subsolver="scip", solver_time_sec=2),
     ]
-    frames = performance_frames(records)
+    references = {
+        instance_id: {"status": "certified", "objective": 5}
+        for instance_id in ("i1", "i2", "i3")
+    }
+    frames = performance_frames(
+        records,
+        references=references,
+        verification={record.run_id: "verified_feasible" for record in records},
+    )
     assert set(frames) == {("gams", "gurobi", None), ("gams", "scip", None)}
     assert frames[("gams", "gurobi", None)].shape == (3, 2)
     assert frames[("gams", "scip", None)].shape == (3, 2)
@@ -194,9 +293,94 @@ def test_incorrect_verified_record_counts_as_failure():
         record(run_id="truth", strategy="truth", objective=5, solver_time_sec=2),
         record(run_id="wrong", strategy="wrong", objective=6, solver_time_sec=1),
     ]
-    frame = performance_frames(records)[("gams", "scip", None)]
+    frame = performance_frames(
+        records,
+        references={"i": {"status": "certified", "objective": 5}},
+        verification={"truth": "verified_feasible", "wrong": "verified_feasible"},
+    )[("gams", "scip", None)]
     assert frame.at["i", "truth"] == 2
     assert np.isnan(frame.at["i", "wrong"])
+
+
+def test_population_fallback_truth_is_used_and_labeled_per_instance():
+    records = [
+        record(run_id="certified", instance_id="cert", objective=2),
+        record(run_id="fallback", instance_id="fallback", objective=5),
+    ]
+    references = {
+        "cert": {"status": "certified", "objective": 2},
+        "fallback": {"status": "reference_unknown", "objective": None},
+    }
+    verification = {record.run_id: "verified_feasible" for record in records}
+    table = summary(records, references=references, verification=verification).reset_index()
+    assert set(table["ground_truth_source"]) == {"reference", "population-fallback"}
+    frames = performance_frames(
+        records, references=references, verification=verification
+    )[("gams", "scip", None)]
+    assert frames.at["fallback", "s"] == 1
+
+
+def test_methods_labels_certified_truth_without_planned_jobs():
+    current = record()
+    table = methods(
+        [current],
+        references={"i": {"status": "certified", "objective": 5}},
+        verification={current.run_id: "verified_feasible"},
+    )
+    assert table["ground_truth_source"].tolist() == ["reference"]
+
+
+def test_missing_verification_is_unknown_not_wrong():
+    assert correctness(record(), {"i": 5}, {}) is None
+
+
+def test_root_gap_closed_rejects_near_zero_denominator():
+    references = {"i": {"status": "certified", "objective": 5}}
+    table = bounds(
+        [
+            record(run_id="solve", objective=5),
+            record(
+                run_id="bigm",
+                mode="root",
+                strategy="bigm",
+                transformation="gdp.bigm",
+                status="node_limit",
+                lower_bound=5 - 1e-7,
+            ),
+            record(run_id="other", mode="root", status="node_limit", lower_bound=5),
+        ],
+        references,
+    )
+    assert table["root_gap_closed"].isna().all()
+
+
+def test_reference_inconsistent_root_is_excluded_everywhere():
+    records = [
+        record(run_id="solve", objective=5),
+        record(
+            run_id="bigm",
+            mode="root",
+            strategy="bigm",
+            transformation="gdp.bigm",
+            status="node_limit",
+            lower_bound=3,
+        ),
+        record(
+            run_id="bad-root",
+            mode="root",
+            strategy="bad",
+            status="node_limit",
+            lower_bound=5.1,
+        ),
+    ]
+    references = {"i": {"status": "certified", "objective": 5}}
+    table = bounds(records, references)
+    assert pd.isna(table.loc[table["strategy"] == "bad", "root_gap_closed"].iloc[0])
+    frame = performance_frames(records, mode="root", references=references)[
+        ("gams", "scip", None)
+    ]
+    assert np.isnan(frame.at["i", "bad"])
+    assert frame.at["i", "bigm"] == 1
 
 
 def test_campaign_styles_are_unique_and_shared_across_solver_groups():

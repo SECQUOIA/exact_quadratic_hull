@@ -2,14 +2,20 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import matplotlib.pyplot as plt
 import pandas as pd
 
-from exact_hull.analysis.outcomes import ground_truth, is_correct
+from exact_hull.analysis.outcomes import (
+    correctness,
+    ground_truth_with_sources,
+    relaxation_certified,
+    root_bound_valid,
+)
 from exact_hull.analysis.profiles import dolan_more
-from exact_hull.experiment.results import VERIFIED_OPTIMAL_STATUSES, RunRecord, read_campaign
+from exact_hull.experiment.results import RunRecord, read_campaign
 
 COLORS = ("#0072B2", "#D55E00", "#009E73", "#CC79A7", "#E69F00", "#56B4E9")
 LINESTYLES = ("-", "--", "-.", ":")
@@ -39,12 +45,17 @@ def performance_frames(
     records: list[RunRecord],
     planned_jobs: list[dict] | None = None,
     planned_instances: list[str] | None = None,
+    mode: str = "solve",
+    references: dict | None = None,
+    verification: dict[str, str] | None = None,
 ) -> dict[SolverGroup, pd.DataFrame]:
     """Build one strategy matrix per solver group, retaining every planned instance."""
-    records = [record for record in records if record.mode == "solve"]
+    if mode not in {"solve", "root", "relaxation"}:
+        raise ValueError(f"Unknown profile mode: {mode}")
+    truth, _ = ground_truth_with_sources(records, references)
+    records = [record for record in records if record.mode == mode]
     if planned_jobs is not None:
-        planned_jobs = [job for job in planned_jobs if job["mode"] == "solve"]
-    truth = ground_truth(records)
+        planned_jobs = [job for job in planned_jobs if job["mode"] == mode]
     if planned_jobs is None:
         groups = sorted({_solver_group(record) for record in records}, key=repr)
         strategies_by_group = {
@@ -74,15 +85,20 @@ def performance_frames(
         strategies = strategies_by_group[group]
         frame = pd.DataFrame(index=planned_instances, columns=strategies, dtype=float)
         for record in grouped:
-            if (
-                record.status not in VERIFIED_OPTIMAL_STATUSES
-                or not is_correct(record.objective, truth.get(record.instance_id))
-                or record.solver_time_sec is None
-            ):
+            completed = correctness(record, truth, verification)
+            if mode == "root":
+                completed = root_bound_valid(
+                    record.lower_bound, record.status, truth.get(record.instance_id)
+                )
+            elif mode == "relaxation":
+                completed = relaxation_certified(record)
+            if completed is not True or record.solver_time_sec is None:
                 continue
             current = frame.at[record.instance_id, record.strategy]
             frame.at[record.instance_id, record.strategy] = (
-                record.solver_time_sec if pd.isna(current) else min(current, record.solver_time_sec)
+                record.solver_time_sec
+                if pd.isna(current)
+                else min(current, record.solver_time_sec)
             )
         frames[group] = frame
     return frames
@@ -92,13 +108,30 @@ def _slug(group: SolverGroup) -> str:
     return "-".join(str(value).lower().replace("_", "-") for value in group if value)
 
 
-def plot_run(run_directory: Path) -> list[Path]:
+def plot_run(
+    run_directory: Path, mode: str = "solve", tolerance: float = 1e-5
+) -> list[Path]:
+    from exact_hull.analysis.verify import verify_run
+
     manifest, records = read_campaign(run_directory)
     planned_jobs = manifest["planned_jobs"]
     planned_instances = [instance["instance_id"] for instance in manifest["instances"]]
-    styles = style_map(job["label"] for job in planned_jobs if job["mode"] == "solve")
+    reference_path = run_directory / "references.json"
+    references = json.loads(reference_path.read_text()) if reference_path.exists() else None
+    verification = {
+        row["run_id"]: row["verification_status"]
+        for row in verify_run(run_directory, tolerance=tolerance)
+    }
+    styles = style_map(job["label"] for job in planned_jobs if job["mode"] == mode)
     destinations = []
-    for group, frame in performance_frames(records, planned_jobs, planned_instances).items():
+    for group, frame in performance_frames(
+        records,
+        planned_jobs,
+        planned_instances,
+        mode=mode,
+        references=references,
+        verification=verification,
+    ).items():
         if frame.empty:
             continue
         profile = dolan_more(frame)
@@ -108,7 +141,8 @@ def plot_run(run_directory: Path) -> list[Path]:
         axis.set_xscale("log")
         axis.set(xlabel="performance ratio", ylabel="fraction solved")
         axis.legend()
-        destination = run_directory / f"performance-profile-{_slug(group)}.png"
+        suffix = "" if mode == "solve" else f"-{mode}"
+        destination = run_directory / f"performance-profile-{_slug(group)}{suffix}.png"
         figure.savefig(destination, bbox_inches="tight", dpi=150)
         plt.close(figure)
         destinations.append(destination)

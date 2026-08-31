@@ -10,6 +10,18 @@ relaxation_time_limit = 600
 NT = [2, 3, 4, 5, 6, 7, 8, 9, 10]
 
 [[strategies]]
+name = "gdp.bigm"
+label = "bigm"
+
+[[strategies]]
+name = "gdp.mbigm"
+label = "mbigm"
+
+[[strategies]]
+name = "gdp.binary_multiplication"
+label = "binmult"
+
+[[strategies]]
 name = "gdp.hull"
 label = "hull"
 
@@ -19,7 +31,7 @@ label = "GEHR"
 
 [[strategies]]
 name = "gdp.hull_exact_conic_no_cholesky"
-label = "CEHR"
+label = "CEHR-mixed"
 
 [[solvers]]
 name = "gams"
@@ -28,8 +40,3 @@ subsolver = "gurobi"
 [[solvers]]
 name = "gams"
 subsolver = "scip"
-
-[[solvers]]
-name = "gams"
-subsolver = "scip"
-variant = "convex"
