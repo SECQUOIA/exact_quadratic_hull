@@ -93,7 +93,7 @@ def performance_frames(
                     record.lower_bound, record.status, truth.get(record.instance_id)
                 )
             elif mode == "relaxation":
-                completed = relaxation_certified(record)
+                completed = relaxation_certified(record, truth.get(record.instance_id))
             if completed is not True or record.solver_time_sec is None:
                 continue
             current = frame.at[record.instance_id, record.strategy]

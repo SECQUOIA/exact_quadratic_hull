@@ -254,7 +254,24 @@ def _time_limit(experiment: dict[str, Any], name: str, default: float) -> float:
 def load_config(path: Path) -> dict[str, Any]:
     with path.open("rb") as stream:
         config = tomllib.load(stream)
+    allowed_top_level = {"experiment", "instances", "strategies", "solvers"}
+    unknown_top_level = set(config) - allowed_top_level
+    if unknown_top_level:
+        key = sorted(unknown_top_level)[0]
+        raise ValueError(f"Unknown top-level config key: {key}")
     experiment = config.get("experiment", {})
+    allowed_experiment = {
+        "benchmark",
+        "base_seed",
+        "time_limit",
+        "modes",
+        "root_time_limit",
+        "relaxation_time_limit",
+    }
+    unknown_experiment = set(experiment) - allowed_experiment
+    if unknown_experiment:
+        key = sorted(unknown_experiment)[0]
+        raise ValueError(f"Unknown experiment config key: {key}")
     benchmark = experiment.get("benchmark")
     if benchmark not in BENCHMARKS:
         raise ValueError(f"Unknown benchmark: {benchmark}")
@@ -271,7 +288,14 @@ def load_config(path: Path) -> dict[str, Any]:
     strategies = []
     identities = set()
     labels = {}
-    for raw_strategy in config["strategies"]:
+    for index, raw_strategy in enumerate(config["strategies"], start=1):
+        unknown_strategy = set(raw_strategy) - {"name", "label", "options"}
+        if unknown_strategy:
+            key = sorted(unknown_strategy)[0]
+            label = raw_strategy.get("label", raw_strategy.get("name", "unknown"))
+            raise ValueError(
+                f"Unknown strategy config key in entry {index} ({label!r}): {key}"
+            )
         name = raw_strategy.get("name")
         if name not in known:
             raise ValueError(f"Unknown transformation: {name}")
@@ -298,7 +322,14 @@ def load_config(path: Path) -> dict[str, Any]:
     root_time_limit = _time_limit(experiment, "root_time_limit", time_limit)
     relaxation_time_limit = _time_limit(experiment, "relaxation_time_limit", time_limit)
     solvers = []
-    for raw_solver in config["solvers"]:
+    for index, raw_solver in enumerate(config["solvers"], start=1):
+        unknown_solver = set(raw_solver) - {"name", "subsolver", "variant"}
+        if unknown_solver:
+            key = sorted(unknown_solver)[0]
+            label = raw_solver.get("subsolver", "unknown")
+            raise ValueError(
+                f"Unknown solver config key in entry {index} ({label!r}): {key}"
+            )
         solver_name = raw_solver.get("name", "gams")
         if solver_name != "gams":
             raise ValueError("Only the GAMS solver interface is supported")
@@ -773,10 +804,12 @@ def _attach_log_metadata(record: RunRecord, log_path: Path, subsolver: str) -> s
 def _load_solution(model, result) -> bool:
     """Load the solver's solution into ``model``; False when no usable incumbent exists.
 
-    GAMS reports ``NA`` variable levels when a solve ends without an incumbent (model
-    status 14). Pyomo's GAMS plugin still inserts a solution object, and loading it fails
-    on the NaN levels of indicator variables, so failure to load is the no-solution signal.
+    GAMS may return loadable zero variable levels when no incumbent exists, so a finite
+    reported upper bound is required in addition to a loadable solution.
     """
+    problem = getattr(result, "problem", None)
+    if problem is None or _as_bound(getattr(problem, "upper_bound", None)) is None:
+        return False
     solutions = getattr(result, "solution", None)
     if solutions is None:  # result objects without Pyomo's solution container
         return True
@@ -915,7 +948,7 @@ def _read_mbigm_cache(
 
 
 def _write_mbigm_cache(path: Path, data: dict[str, Any]) -> None:
-    """Atomically publish one valid M set, accepting a same-options race winner."""
+    """Atomically publish one valid M set, accepting an identical race winner."""
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = json.dumps(data, indent=2, sort_keys=True) + "\n"
     with tempfile.NamedTemporaryFile(
@@ -933,6 +966,11 @@ def _write_mbigm_cache(path: Path, data: dict[str, Any]) -> None:
             if existing.get("options_fingerprint") != data["options_fingerprint"]:
                 raise ValueError(
                     f"M-value cache {path} was concurrently created with different mbigm options"
+                ) from error
+            if existing.get("values") != data.get("values"):
+                raise ValueError(
+                    f"M-value cache {path} was concurrently created with diverging M values; "
+                    "rerun this job"
                 ) from error
     finally:
         temporary.unlink(missing_ok=True)
@@ -1095,7 +1133,7 @@ def run_job(
         solver = SolverFactory("gams")
         # keepfiles=True so Pyomo never tries to delete a primal GDX that GAMS did not
         # write (no-incumbent timeouts); the scratch directory is removed below. Solutions
-        # are loaded manually because Pyomo crashes loading NaN levels into indicators.
+        # are loaded manually after checking that GAMS reported an incumbent objective.
         try:
             with contextlib.redirect_stdout(io.StringIO()):
                 result = solver.solve(
@@ -1297,7 +1335,19 @@ def _execute_tasks(tasks: list[_ExecutionTask], jobs: int) -> list[RunRecord]:
                 records.append(future.result())
                 if task.job.strategy == "gdp.mbigm":
                     key = (task.output_directory, task.job.instance_id)
-                    for gated_task in gated.pop(key, []):
+                    remaining = gated.get(key, [])
+                    cache_path = (
+                        task.output_directory / "mbigm" / f"{task.job.instance_id}.json"
+                    )
+                    if cache_path.exists():
+                        released = gated.pop(key, [])
+                    elif remaining:
+                        released = [remaining.pop(0)]
+                        if not remaining:
+                            gated.pop(key)
+                    else:
+                        released = []
+                    for gated_task in released:
                         futures[executor.submit(_run_job_worker, gated_task, jobs)] = gated_task
     except BaseException:
         executor.shutdown(wait=False, cancel_futures=True)

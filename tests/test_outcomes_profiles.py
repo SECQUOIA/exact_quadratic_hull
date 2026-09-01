@@ -204,6 +204,57 @@ def test_censoring_reports_bound_above_verified_population_truth():
     assert table.iloc[0]["reason"] == "dual_bound_exceeds_reference"
 
 
+@pytest.mark.parametrize("objective", [4.0, 5.00001])
+def test_relaxation_consistency_gate_accepts_values_below_or_close_to_truth(objective):
+    records = [
+        record(run_id="solve", objective=5),
+        record(
+            run_id="relax",
+            mode="relaxation",
+            objective=objective,
+            lower_bound=objective,
+        ),
+    ]
+    table = bounds(records, verification={"solve": "verified_feasible"})
+    assert table.iloc[0]["relaxation_certified"]
+
+
+def test_relaxation_consistency_gate_censors_value_above_truth():
+    records = [
+        record(run_id="solve", objective=5),
+        record(
+            run_id="relax",
+            mode="relaxation",
+            objective=5.001,
+            lower_bound=5.001,
+        ),
+    ]
+    verification = {"solve": "verified_feasible"}
+    row = bounds(records, verification=verification).iloc[0]
+    assert not row["relaxation_certified"]
+    assert pd.isna(row["relaxation_gap"])
+    excluded = censoring(records, verification=verification)
+    assert excluded.iloc[0]["reason"] == "dual_bound_exceeds_reference"
+
+
+def test_relaxation_consistency_gate_uses_the_bound_that_defines_the_gap():
+    records = [
+        record(run_id="solve", objective=5),
+        record(
+            run_id="relax",
+            mode="relaxation",
+            objective=5.00004,
+            lower_bound=5.00009,
+        ),
+    ]
+    verification = {"solve": "verified_feasible"}
+    row = bounds(records, verification=verification).iloc[0]
+    assert not row["relaxation_certified"]
+    assert pd.isna(row["relaxation_gap"])
+    excluded = censoring(records, verification=verification)
+    assert excluded.iloc[0]["reason"] == "dual_bound_exceeds_reference"
+
+
 def test_reference_invalid_certificate_and_root_gap_closed():
     references = {"i": {"status": "certified", "objective": 5}}
     bad = record(lower_bound=5.1)

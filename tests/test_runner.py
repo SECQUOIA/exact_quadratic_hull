@@ -565,13 +565,22 @@ def test_mbigm_cache_is_reused_and_transform_times_are_recorded(tmp_path, monkey
         )
 
 
-def test_mbigm_cache_race_accepts_a_different_same_options_m_set(tmp_path):
+def test_mbigm_cache_race_rejects_a_different_same_options_m_set(tmp_path):
     path = tmp_path / "mbigm.json"
     first = {"options_fingerprint": "same", "values": [{"value": [1, 2]}]}
     second = {"options_fingerprint": "same", "values": [{"value": [3, 4]}]}
     runner._write_mbigm_cache(path, first)
-    runner._write_mbigm_cache(path, second)
+    with pytest.raises(ValueError, match="diverging M values"):
+        runner._write_mbigm_cache(path, second)
     assert json.loads(path.read_text()) == first
+
+
+def test_mbigm_cache_race_accepts_identical_values(tmp_path):
+    path = tmp_path / "mbigm.json"
+    payload = {"options_fingerprint": "same", "values": [{"value": [1, 2]}]}
+    runner._write_mbigm_cache(path, payload)
+    runner._write_mbigm_cache(path, payload)
+    assert json.loads(path.read_text()) == payload
 
 
 def test_mbigm_options_fingerprint_includes_estimator_identity():
@@ -814,6 +823,61 @@ def test_parallel_phases_gate_mbigm_per_campaign_and_instance(tmp_path):
 
     assert phase_one == [first_gate, non_mbigm, second_gate, other_instance]
     assert gated == {(first_directory, "shared"): [first_gated]}
+
+
+def test_process_pool_chain_releases_mbigm_after_failed_cache_publication(
+    tmp_path, monkeypatch
+):
+    tasks = [
+        runner._ExecutionTask(
+            replace(_job(f"mbigm-{index}"), strategy="gdp.mbigm", instance_id="shared"),
+            tmp_path,
+            {},
+        )
+        for index in range(4)
+    ]
+    calls = []
+
+    def worker(task, concurrency):
+        calls.append(task.job.run_id)
+        if len(calls) == 2:
+            cache = task.output_directory / "mbigm" / f"{task.job.instance_id}.json"
+            cache.parent.mkdir(parents=True)
+            cache.write_text("{}")
+        status = "transform_error" if len(calls) == 1 else "optimal"
+        return _record_for_job(task.job, status=status, concurrency=concurrency)
+
+    class Future:
+        def __init__(self, result):
+            self._result = result
+
+        def result(self):
+            return self._result
+
+    class Executor:
+        @staticmethod
+        def submit(function, *args):
+            return Future(function(*args))
+
+        @staticmethod
+        def shutdown(**kwargs):
+            pass
+
+    pending_sizes = []
+
+    def complete_one(futures, return_when):
+        pending_sizes.append(len(futures))
+        return {next(iter(futures))}, set()
+
+    monkeypatch.setattr(runner, "_run_job_worker", worker)
+    monkeypatch.setattr(runner, "ProcessPoolExecutor", lambda **kwargs: Executor())
+    monkeypatch.setattr(runner, "wait", complete_one)
+
+    records = runner._execute_tasks(tasks, jobs=4)
+
+    assert calls == [task.job.run_id for task in tasks]
+    assert pending_sizes[:3] == [1, 1, 2]
+    assert len(records) == 4
 
 
 @pytest.mark.parametrize(
@@ -1078,6 +1142,53 @@ def test_report_and_reference_forward_verification_tolerance(tmp_path, monkeypat
     assert captured["plot"] == 4e-5
 
 
+def test_reference_command_warns_about_demotions_and_improvements(
+    tmp_path, monkeypatch, capsys
+):
+    previous = {
+        "references": {
+            instance_id: {
+                "status": "certified",
+                "objective": 10,
+                "provenance": {"route": "agreement"},
+            }
+            for instance_id in ("demoted", "improved", "unchanged")
+        }
+    }
+    updated = {
+        "references": {
+            "demoted": {
+                "status": "reference_unknown",
+                "objective": None,
+                "provenance": {"route": "agreement"},
+            },
+            "improved": {
+                "status": "certified",
+                "objective": 3,
+                "provenance": {"route": "agreement"},
+            },
+            "unchanged": previous["references"]["unchanged"],
+        }
+    }
+    write_json_atomic(previous, tmp_path / "references.json")
+    monkeypatch.setattr(
+        "exact_hull.analysis.references.derive_references",
+        lambda *args, **kwargs: updated,
+    )
+
+    assert main(["reference", str(tmp_path)]) == 0
+    error = capsys.readouterr().err
+    assert (
+        "WARNING: Agreement references demoted to reference_unknown for instances: demoted"
+        in error
+    )
+    assert (
+        "WARNING: Previously agreement-certified references improved for instances: improved"
+        in error
+    )
+    assert "unchanged" not in error
+
+
 def test_bad_typed_record_is_skipped_and_rerun_on_resume(tmp_path, monkeypatch):
     config_path = Path(__file__).parents[1] / "configs" / "smoke.toml"
     config = runner.load_config(config_path)
@@ -1207,8 +1318,8 @@ def test_resume_only_options_use_argparse_error(option):
     assert error.value.code == 2
 
 
-def test_timeout_without_incumbent_records_no_objective(tmp_path, monkeypatch):
-    """GAMS reports NA levels for no-incumbent timeouts; Pyomo cannot load them."""
+def test_timeout_without_reported_incumbent_records_no_objective(tmp_path, monkeypatch):
+    loaded = []
 
     class TinyBenchmark:
         @staticmethod
@@ -1216,6 +1327,8 @@ def test_timeout_without_incumbent_records_no_objective(tmp_path, monkeypatch):
             model = ConcreteModel()
             model.x = Var(initialize=0)
             model.objective = Objective(expr=model.x)
+            model.solutions.load_from = lambda received: loaded.append(received)
+            TinyBenchmark.model = model
             return model
 
         @staticmethod
@@ -1229,8 +1342,8 @@ def test_timeout_without_incumbent_records_no_objective(tmp_path, monkeypatch):
             message=None,
             user_time=6.0,
         ),
-        problem=SimpleNamespace(lower_bound=-1.0, upper_bound=-0.08882106844809479),
-        solution=[SimpleNamespace()],  # a solution container Pyomo cannot load
+        problem=SimpleNamespace(lower_bound=-1.0, upper_bound=float("nan")),
+        solution=[SimpleNamespace()],
     )
 
     class NoIncumbentSolver:
@@ -1246,4 +1359,52 @@ def test_timeout_without_incumbent_records_no_objective(tmp_path, monkeypatch):
     assert record.solution == {}
     assert record.lower_bound == -1.0
     assert record.upper_bound is None
+    assert loaded == []
+    result.problem.upper_bound = 0.0
+    assert runner._load_solution(TinyBenchmark.model, result)
+    assert loaded == [result]
     assert not (tmp_path / "jobs" / record.run_id / "scratch").exists()
+
+
+def test_load_solution_rejects_an_empty_solution_container():
+    model = ConcreteModel()
+    result = SimpleNamespace(
+        problem=SimpleNamespace(upper_bound=0.0),
+        solution=[],
+    )
+    assert not runner._load_solution(model, result)
+
+
+@pytest.mark.parametrize("error_type", [ValueError, TypeError, KeyError])
+def test_load_solution_contains_load_failures(error_type):
+    model = ConcreteModel()
+
+    def fail(result):
+        raise error_type("cannot load")
+
+    model.solutions.load_from = fail
+    result = SimpleNamespace(
+        problem=SimpleNamespace(upper_bound=0.0),
+        solution=[SimpleNamespace()],
+    )
+    assert not runner._load_solution(model, result)
+
+
+def test_report_warns_when_planned_results_are_missing(tmp_path, capsys):
+    config = runner.load_config(Path(__file__).parents[1] / "configs" / "smoke.toml")
+    first_job = runner.expand_jobs(config)[0]
+    second_job = replace(first_job, run_id="missing")
+    runner._prepare_manifest(
+        tmp_path, runner.build_manifest(config, [first_job, second_job]), resume=False
+    )
+    write_record_atomic(
+        _record_for_job(first_job),
+        tmp_path / "jobs" / first_job.run_id / "result.json",
+    )
+
+    assert main(["report", str(tmp_path)]) == 0
+    assert (
+        "WARNING: 1 of 2 planned jobs have no result; aggregate statistics "
+        "(including shifted geometric means) describe an incomplete campaign"
+        in capsys.readouterr().err
+    )

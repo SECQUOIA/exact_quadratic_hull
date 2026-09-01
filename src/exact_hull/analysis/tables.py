@@ -242,7 +242,7 @@ def bounds(
         elif record.mode == "root":
             row.update(root_bound=record.lower_bound, root_status=record.status)
         else:
-            certified = relaxation_certified(record)
+            certified = relaxation_certified(record, truth.get(record.instance_id))
             row.update(
                 relaxation_bound=record.lower_bound,
                 relaxation_value=record.objective,
@@ -348,7 +348,9 @@ def censoring(
                 record.lower_bound, record.status, truth.get(record.instance_id)
             ):
                 reason = "dual_bound_exceeds_reference"
-        elif record.mode == "relaxation" and not relaxation_certified(record):
+        elif record.mode == "relaxation" and not relaxation_certified(
+            record, truth.get(record.instance_id)
+        ):
             if record.objective is None or not math.isfinite(record.objective):
                 reason = "missing_finite_primal"
             elif record.lower_bound is None or not math.isfinite(record.lower_bound):
@@ -357,8 +359,10 @@ def censoring(
                 record.status == "feasible" and record.solver_status == "ok"
             ):
                 reason = "unacceptable_status"
-            else:
+            elif not is_correct(record.objective, record.lower_bound):
                 reason = "primal_dual_disagreement"
+            else:
+                reason = "dual_bound_exceeds_reference"
         if reason is not None:
             rows.append(
                 {

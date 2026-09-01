@@ -234,6 +234,7 @@ def test_fixed_selection_solver_accepts_leftover_binary(monkeypatch):
             status=SolverStatus.ok,
             termination_condition=TerminationCondition.optimal,
         ),
+        problem=SimpleNamespace(upper_bound=0.0),
         solution=None,
     )
     calls = []
@@ -321,10 +322,364 @@ def test_reference_provenance_is_route_specific(tmp_path, monkeypatch):
     assert entries["enumerated"]["provenance"]["time_limit_sec"] == 300
     assert entries["agreement"]["provenance"] == {
         "route": "agreement",
-        "run_ids": ["agree-scip", "agree-gurobi"],
-        "subsolvers": ["scip", "gurobi"],
+        "run_ids": ["agree-gurobi", "agree-scip"],
+        "subsolvers": ["gurobi", "scip"],
     }
     assert "time_limit_sec" not in entries["unknown"]["provenance"]
+
+
+def _derive_agreement_reference(tmp_path, monkeypatch, records):
+    manifest = {
+        "config": {"experiment": {"benchmark": "tiny"}},
+        "instances": [{"instance_id": "agreement", "params": {}, "seed": 1}],
+    }
+    monkeypatch.setattr(
+        "exact_hull.analysis.references.read_campaign",
+        lambda path: (manifest, records),
+    )
+    monkeypatch.setattr(
+        "exact_hull.analysis.references.verify_run",
+        lambda path, tolerance=1e-5, reverify=False: [
+            {"run_id": record.run_id, "verification_status": "verified_feasible"}
+            for record in records
+        ],
+    )
+    monkeypatch.setattr(
+        "exact_hull.analysis.references.enumerate_reference",
+        lambda *args, **kwargs: (
+            None,
+            {"route": "enumeration", "selection_count": 5000, "skipped": True},
+        ),
+    )
+    monkeypatch.setattr("exact_hull.analysis.references._versions", lambda: {})
+    return derive_references(tmp_path)["references"]["agreement"]
+
+
+def test_reference_agreement_selects_the_best_agreeing_pair(tmp_path, monkeypatch):
+    records = [
+        replace(
+            _tiny_record(10),
+            run_id="worse-scip",
+            instance_id="agreement",
+            subsolver="scip",
+        ),
+        replace(
+            _tiny_record(10),
+            run_id="worse-gurobi",
+            instance_id="agreement",
+            subsolver="gurobi",
+        ),
+        replace(
+            _tiny_record(5),
+            run_id="better-scip",
+            instance_id="agreement",
+            subsolver="scip",
+        ),
+        replace(
+            _tiny_record(5),
+            run_id="better-gurobi",
+            instance_id="agreement",
+            subsolver="gurobi",
+        ),
+    ]
+
+    entry = _derive_agreement_reference(tmp_path, monkeypatch, records)
+
+    assert entry["status"] == "certified"
+    assert entry["objective"] == 5
+    assert entry["provenance"]["run_ids"] == ["better-gurobi", "better-scip"]
+
+
+def test_reference_agreement_is_falsified_by_a_better_feasible_record(
+    tmp_path, monkeypatch
+):
+    records = [
+        replace(
+            _tiny_record(10),
+            run_id="agree-scip",
+            instance_id="agreement",
+            subsolver="scip",
+        ),
+        replace(
+            _tiny_record(10),
+            run_id="agree-gurobi",
+            instance_id="agreement",
+            subsolver="gurobi",
+        ),
+        replace(
+            _tiny_record(5),
+            run_id="better-feasible",
+            instance_id="agreement",
+            status="feasible",
+        ),
+    ]
+
+    entry = _derive_agreement_reference(tmp_path, monkeypatch, records)
+
+    assert entry["status"] == "reference_unknown"
+    assert entry["objective"] is None
+    assert entry["provenance"]["route"] == "agreement"
+    assert entry["provenance"]["conflict"] == {
+        "run_id": "better-feasible",
+        "objective": 5,
+        "agreed_objective": 10,
+    }
+
+
+def test_agreement_certificate_is_demoted_when_a_rerun_finds_a_conflict(
+    tmp_path, monkeypatch
+):
+    records = [
+        replace(
+            _tiny_record(10),
+            run_id=f"agree-{subsolver}",
+            instance_id="agreement",
+            subsolver=subsolver,
+        )
+        for subsolver in ("scip", "gurobi")
+    ]
+    first = _derive_agreement_reference(tmp_path, monkeypatch, records)
+    assert first["status"] == "certified"
+
+    records.append(
+        replace(
+            _tiny_record(3),
+            run_id="better-feasible",
+            instance_id="agreement",
+            status="feasible",
+        )
+    )
+    second = _derive_agreement_reference(tmp_path, monkeypatch, records)
+
+    assert second["status"] == "reference_unknown"
+    assert second["provenance"]["conflict"] == {
+        "run_id": "better-feasible",
+        "objective": 3,
+        "agreed_objective": 10,
+    }
+
+
+def test_agreement_certificate_improves_when_a_better_pair_appears(
+    tmp_path, monkeypatch
+):
+    records = [
+        replace(
+            _tiny_record(10),
+            run_id=f"worse-{subsolver}",
+            instance_id="agreement",
+            subsolver=subsolver,
+        )
+        for subsolver in ("scip", "gurobi")
+    ]
+    first = _derive_agreement_reference(tmp_path, monkeypatch, records)
+    assert first["objective"] == 10
+
+    records.extend(
+        replace(
+            _tiny_record(3),
+            run_id=f"better-{subsolver}",
+            instance_id="agreement",
+            subsolver=subsolver,
+        )
+        for subsolver in ("scip", "gurobi")
+    )
+    second = _derive_agreement_reference(tmp_path, monkeypatch, records)
+
+    assert second["status"] == "certified"
+    assert second["objective"] == 3
+    assert second["provenance"]["run_ids"] == ["better-gurobi", "better-scip"]
+
+
+def test_enumeration_certificate_is_reused_without_resolving(tmp_path, monkeypatch):
+    manifest = {
+        "config": {"experiment": {"benchmark": "tiny"}},
+        "instances": [{"instance_id": "enumerated", "params": {}, "seed": 1}],
+    }
+    calls = []
+    monkeypatch.setattr(
+        "exact_hull.analysis.references.read_campaign",
+        lambda path: (manifest, []),
+    )
+    monkeypatch.setattr(
+        "exact_hull.analysis.references.verify_run",
+        lambda *args, **kwargs: [],
+    )
+
+    def enumerate_once(*args, **kwargs):
+        calls.append(True)
+        return 2.0, {"route": "enumeration", "selection_count": 2, "solved": 2}
+
+    monkeypatch.setattr(
+        "exact_hull.analysis.references.enumerate_reference", enumerate_once
+    )
+    monkeypatch.setattr("exact_hull.analysis.references._versions", lambda: {})
+
+    assert derive_references(tmp_path)["references"]["enumerated"]["objective"] == 2
+    assert derive_references(tmp_path)["references"]["enumerated"]["objective"] == 2
+    assert len(calls) == 1
+
+
+def test_agreement_certificate_is_replaced_when_enumeration_succeeds_on_rerun(
+    tmp_path, monkeypatch
+):
+    manifest = {
+        "config": {"experiment": {"benchmark": "tiny"}},
+        "instances": [{"instance_id": "agreement", "params": {}, "seed": 1}],
+    }
+    records = [
+        replace(
+            _tiny_record(10),
+            run_id=f"agree-{subsolver}",
+            instance_id="agreement",
+            subsolver=subsolver,
+        )
+        for subsolver in ("scip", "gurobi")
+    ]
+    outcomes = [
+        (None, {"route": "enumeration", "selection_count": 2, "solved": 1}),
+        (2.0, {"route": "enumeration", "selection_count": 2, "solved": 2}),
+    ]
+    calls = []
+    monkeypatch.setattr(
+        "exact_hull.analysis.references.read_campaign",
+        lambda path: (manifest, records),
+    )
+    monkeypatch.setattr(
+        "exact_hull.analysis.references.verify_run",
+        lambda *args, **kwargs: [
+            {"run_id": record.run_id, "verification_status": "verified_feasible"}
+            for record in records
+        ],
+    )
+
+    def enumerate_twice(*args, **kwargs):
+        calls.append(True)
+        return outcomes.pop(0)
+
+    monkeypatch.setattr(
+        "exact_hull.analysis.references.enumerate_reference", enumerate_twice
+    )
+    monkeypatch.setattr("exact_hull.analysis.references._versions", lambda: {})
+
+    first = derive_references(tmp_path)["references"]["agreement"]
+    second = derive_references(tmp_path)["references"]["agreement"]
+
+    assert first["provenance"]["route"] == "agreement"
+    assert second["status"] == "certified"
+    assert second["objective"] == 2
+    assert second["provenance"]["route"] == "enumeration"
+    assert len(calls) == 2
+
+
+def test_agreement_rerun_attempts_over_cap_enumeration_without_selection_solves(
+    tmp_path, monkeypatch
+):
+    manifest = {
+        "config": {"experiment": {"benchmark": "tiny"}},
+        "instances": [{"instance_id": "agreement", "params": {}, "seed": 1}],
+    }
+    records = [
+        replace(
+            _tiny_record(10),
+            run_id=f"agree-{subsolver}",
+            instance_id="agreement",
+            subsolver=subsolver,
+        )
+        for subsolver in ("scip", "gurobi")
+    ]
+    (tmp_path / "references.json").write_text(
+        '{"references":{"agreement":{"status":"certified","objective":10,'
+        '"provenance":{"route":"agreement"}}}}'
+    )
+    enumeration_calls = []
+    selection_calls = []
+    original = enumerate_reference
+    monkeypatch.setitem(BENCHMARKS, "tiny", TinyBenchmark())
+    monkeypatch.setattr(
+        "exact_hull.analysis.references.read_campaign",
+        lambda path: (manifest, records),
+    )
+    monkeypatch.setattr(
+        "exact_hull.analysis.references.verify_run",
+        lambda *args, **kwargs: [
+            {"run_id": record.run_id, "verification_status": "verified_feasible"}
+            for record in records
+        ],
+    )
+
+    def counted_enumeration(*args, **kwargs):
+        enumeration_calls.append(True)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(
+        "exact_hull.analysis.references.enumerate_reference", counted_enumeration
+    )
+    monkeypatch.setattr("exact_hull.analysis.references._versions", lambda: {})
+
+    entry = derive_references(
+        tmp_path,
+        cap=1,
+        solve_selection=lambda model: selection_calls.append(model),
+    )["references"]["agreement"]
+
+    assert enumeration_calls == [True]
+    assert selection_calls == []
+    assert entry["status"] == "certified"
+    assert entry["objective"] == 10
+    assert entry["provenance"]["route"] == "agreement"
+
+
+def test_agreement_pair_tie_break_is_independent_of_record_order(
+    tmp_path, monkeypatch
+):
+    records = [
+        replace(
+            _tiny_record(5),
+            run_id=run_id,
+            instance_id="agreement",
+            subsolver=subsolver,
+        )
+        for run_id, subsolver in (
+            ("d-gurobi", "gurobi"),
+            ("c-scip", "scip"),
+            ("b-gurobi", "gurobi"),
+            ("a-scip", "scip"),
+        )
+    ]
+    first = _derive_agreement_reference(
+        tmp_path / "a", monkeypatch, records
+    )["provenance"]
+    second = _derive_agreement_reference(
+        tmp_path / "b", monkeypatch, list(reversed(records))
+    )["provenance"]
+
+    assert first == second
+    assert first["run_ids"] == ["a-scip", "b-gurobi"]
+
+
+def test_agreement_tolerance_is_independent_of_record_order(tmp_path, monkeypatch):
+    low = replace(
+        _tiny_record(100.0),
+        run_id="low-scip",
+        instance_id="agreement",
+        subsolver="scip",
+    )
+    high = replace(
+        _tiny_record(100.001000005),
+        run_id="high-gurobi",
+        instance_id="agreement",
+        subsolver="gurobi",
+    )
+
+    forward = _derive_agreement_reference(
+        tmp_path / "forward", monkeypatch, [low, high]
+    )
+    reverse = _derive_agreement_reference(
+        tmp_path / "reverse", monkeypatch, [high, low]
+    )
+
+    assert forward["status"] == reverse["status"] == "reference_unknown"
+    assert forward["provenance"] == reverse["provenance"]
 
 
 def test_inspect_writes_transform_counts_without_solver_backends(tmp_path, monkeypatch):

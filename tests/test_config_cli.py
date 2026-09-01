@@ -20,8 +20,8 @@ def test_all_configs_load_and_expected_case_counts():
         "random_psd_scip_convex.toml": (36, 360),
         "random_psd_gurobi_auto.toml": (36, 216),
         "random_psd_conic.toml": (18, 432),
-        "random_nonconvex.toml": (24, 480),
-        "eps_relaxation.toml": (36, 720),
+        "random_nonconvex.toml": (24, 720),
+        "eps_relaxation.toml": (36, 1296),
         "kmeans.toml": (48, 1728),
         "clay.toml": (6, 216),
         "cstr.toml": (9, 180),
@@ -66,12 +66,26 @@ def test_conic_instances_are_the_replicate_one_psd_subset():
     assert {job.instance_id for job in conic_jobs} == psd_replicate_one
 
 
-def test_epsilon_campaign_has_no_psd_job_fingerprint_overlap():
+def test_epsilon_campaign_overlap_is_only_the_self_contained_1e_4_arm():
     psd = {job.run_id for job in expand_jobs(load_config(ROOT / "configs" / "random_psd.toml"))}
-    epsilon = {
-        job.run_id for job in expand_jobs(load_config(ROOT / "configs" / "eps_relaxation.toml"))
+    epsilon_jobs = expand_jobs(load_config(ROOT / "configs" / "eps_relaxation.toml"))
+    epsilon = {job.run_id for job in epsilon_jobs}
+    overlap = psd & epsilon
+    expected = {
+        job.run_id
+        for job in epsilon_jobs
+        if job.transformation_options["EPS"] == pytest.approx(1e-4)
     }
-    assert psd.isdisjoint(epsilon)
+    assert overlap == expected
+    assert {job.mode for job in epsilon_jobs} == {"solve", "root", "relaxation"}
+    assert {job.label for job in epsilon_jobs} == {
+        "hull-eps-1e-1",
+        "hull-eps-1e-2",
+        "hull-eps-1e-3",
+        "hull-eps-1e-4",
+        "hull-eps-1e-5",
+        "hull-eps-1e-6",
+    }
 
 
 def test_main_campaign_strategy_and_solver_matrix():
@@ -125,6 +139,73 @@ subsolver = "scip"
 """
     )
     with pytest.raises(ValueError, match="Unknown transformation"):
+        load_config(config)
+
+
+@pytest.mark.parametrize(
+    ("extra", "message"),
+    [
+        ("time_limt = 10", "Unknown experiment config key: time_limt"),
+        ("[unexpected]", "Unknown top-level config key: unexpected"),
+    ],
+)
+def test_unknown_config_keys_fail_at_load(tmp_path, extra, message):
+    config = tmp_path / "bad.toml"
+    if extra.startswith("["):
+        suffix = extra
+        experiment_extra = ""
+    else:
+        suffix = ""
+        experiment_extra = extra
+    config.write_text(
+        f"""
+[experiment]
+benchmark = "kmeans"
+{experiment_extra}
+[instances]
+n_dimensions = 2
+n_clusters = 2
+n_points = 3
+[[strategies]]
+name = "gdp.bigm"
+[[solvers]]
+subsolver = "scip"
+{suffix}
+"""
+    )
+    with pytest.raises(ValueError, match=message):
+        load_config(config)
+
+
+@pytest.mark.parametrize(
+    ("strategy_extra", "solver_extra", "message"),
+    [
+        ("[strategies.optoins]\nEPS = 1e-3", "", "strategy.*optoins"),
+        ("", "threds = 2", "solver.*threds"),
+    ],
+)
+def test_unknown_strategy_and_solver_keys_fail_at_load(
+    tmp_path, strategy_extra, solver_extra, message
+):
+    config = tmp_path / "bad-entry.toml"
+    config.write_text(
+        f"""
+[experiment]
+benchmark = "kmeans"
+[instances]
+n_dimensions = 2
+n_clusters = 2
+n_points = 3
+[[strategies]]
+name = "gdp.hull"
+label = "hull"
+{strategy_extra}
+[[solvers]]
+subsolver = "scip"
+{solver_extra}
+"""
+    )
+    with pytest.raises(ValueError, match=message):
         load_config(config)
 
 

@@ -243,6 +243,16 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "report":
         run_directory = args.rundir.resolve()
         manifest, records = read_campaign(run_directory)
+        planned_run_ids = {job["run_id"] for job in manifest["planned_jobs"]}
+        completed_run_ids = {record.run_id for record in records}
+        missing = planned_run_ids - completed_run_ids
+        if missing:
+            print(
+                f"WARNING: {len(missing)} of {len(planned_run_ids)} planned jobs have no result; "
+                "aggregate statistics (including shifted geometric means) describe an "
+                "incomplete campaign",
+                file=sys.stderr,
+            )
         from exact_hull.analysis.verify import verify_run
 
         verification_rows = verify_run(
@@ -325,13 +335,52 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "reference":
         from exact_hull.analysis.references import derive_references
 
-        derive_references(
-            args.rundir.resolve(),
+        run_directory = args.rundir.resolve()
+        reference_path = run_directory / "references.json"
+        try:
+            previous = json.loads(reference_path.read_text()) if reference_path.exists() else {}
+        except (OSError, json.JSONDecodeError, TypeError):
+            previous = {}
+        updated = derive_references(
+            run_directory,
             cap=args.cap,
             reverify=args.reverify,
             tolerance=args.tolerance,
         )
-        print(args.rundir.resolve() / "references.json")
+        previous_entries = previous.get("references", {})
+        updated_entries = updated.get("references", {})
+        previous_agreements = {
+            instance_id: entry
+            for instance_id, entry in previous_entries.items()
+            if entry.get("status") == "certified"
+            and entry.get("provenance", {}).get("route") == "agreement"
+        }
+        demoted = sorted(
+            instance_id
+            for instance_id in previous_agreements
+            if updated_entries.get(instance_id, {}).get("status") != "certified"
+        )
+        improved = sorted(
+            instance_id
+            for instance_id, entry in previous_agreements.items()
+            if updated_entries.get(instance_id, {}).get("status") == "certified"
+            and isinstance(entry.get("objective"), int | float)
+            and isinstance(updated_entries[instance_id].get("objective"), int | float)
+            and updated_entries[instance_id]["objective"] < entry["objective"]
+        )
+        if demoted:
+            print(
+                "WARNING: Agreement references demoted to reference_unknown for instances: "
+                + ", ".join(demoted),
+                file=sys.stderr,
+            )
+        if improved:
+            print(
+                "WARNING: Previously agreement-certified references improved for instances: "
+                + ", ".join(improved),
+                file=sys.stderr,
+            )
+        print(reference_path)
         return 0
     if args.command == "conic-bound":
         from exact_hull.experiment.conic_oracle import conic_bounds

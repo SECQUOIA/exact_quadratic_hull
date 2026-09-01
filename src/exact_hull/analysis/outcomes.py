@@ -91,7 +91,8 @@ def invalid_certificate(
     )
 
 
-def relaxation_certified(record: RunRecord) -> bool:
+def relaxation_certified(record: RunRecord, truth: float | None = None) -> bool:
+    """Certify primal-dual agreement and consistency of the dual bound with truth."""
     acceptable = record.status in VERIFIED_OPTIMAL_STATUSES or (
         record.status == "feasible" and record.solver_status == "ok"
     )
@@ -102,6 +103,11 @@ def relaxation_certified(record: RunRecord) -> bool:
         and math.isfinite(record.objective)
         and math.isfinite(record.lower_bound)
         and is_correct(record.objective, record.lower_bound)
+        and (
+            truth is None
+            or record.lower_bound < truth
+            or is_correct(record.lower_bound, truth)
+        )
     )
 
 

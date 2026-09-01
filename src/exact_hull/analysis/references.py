@@ -125,38 +125,72 @@ def derive_references(
         entries = {}
     for instance in manifest["instances"]:
         case = BenchmarkCase(instance["instance_id"], instance["params"], instance["seed"])
-        if entries.get(case.instance_id, {}).get("status") == "certified":
+        existing = entries.get(case.instance_id, {})
+        existing_route = existing.get("provenance", {}).get("route")
+        if existing.get("status") == "certified" and existing_route == "enumeration":
             continue
         objective, provenance = enumerate_reference(
             benchmark_name, case, cap=cap, solve_selection=solve_selection
         )
         if objective is None:
-            candidates = [
+            feasible_records = [
                 record
                 for record in records
                 if record.instance_id == case.instance_id
                 and record.mode == "solve"
                 and record.variant != "convex"
-                and record.status in VERIFIED_OPTIMAL_STATUSES
                 and verified.get(record.run_id) == "verified_feasible"
                 and record.objective is not None
+                and math.isfinite(record.objective)
             ]
-            pair = next(
-                (
-                    (left, right)
-                    for left, right in itertools.combinations(candidates, 2)
-                    if left.subsolver != right.subsolver
-                    and is_correct(left.objective, right.objective)
+            candidates = [
+                record
+                for record in feasible_records
+                if record.status in VERIFIED_OPTIMAL_STATUSES
+            ]
+            pairs = [
+                (left, right)
+                for left, right in itertools.combinations(candidates, 2)
+                if left.subsolver != right.subsolver
+                and is_correct(
+                    max(left.objective, right.objective),
+                    min(left.objective, right.objective),
+                )
+            ]
+            pair = min(
+                pairs,
+                key=lambda item: (
+                    min(item[0].objective, item[1].objective),
+                    tuple(sorted((item[0].run_id, item[1].run_id))),
                 ),
-                None,
+                default=None,
             )
             if pair is not None:
-                objective = min(pair[0].objective, pair[1].objective)
+                pair = tuple(sorted(pair, key=lambda record: record.run_id))
+                agreed_objective = min(pair[0].objective, pair[1].objective)
                 provenance = {
                     "route": "agreement",
                     "run_ids": [pair[0].run_id, pair[1].run_id],
                     "subsolvers": [pair[0].subsolver, pair[1].subsolver],
                 }
+                conflict = min(
+                    (
+                        record
+                        for record in feasible_records
+                        if record.objective < agreed_objective
+                        and not is_correct(record.objective, agreed_objective)
+                    ),
+                    key=lambda record: (record.objective, record.run_id),
+                    default=None,
+                )
+                if conflict is None:
+                    objective = agreed_objective
+                else:
+                    provenance["conflict"] = {
+                        "run_id": conflict.run_id,
+                        "objective": conflict.objective,
+                        "agreed_objective": agreed_objective,
+                    }
         if provenance.get("route") == "enumeration" and not provenance.get("skipped"):
             provenance.update(
                 {
