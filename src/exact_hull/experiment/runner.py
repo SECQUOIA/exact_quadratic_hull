@@ -875,6 +875,9 @@ class _GamsMbigmSolver:
         )
         mbigm_options = options_for("gurobi", 30)
         mbigm_options.insert(mbigm_options.index("$offecho"), "DualReductions 0")
+        # Gurobi must stop strictly inside GAMS's optcr; a stop exactly at the
+        # shared 1e-6 gap can be reclassified as non-optimal on readback.
+        mbigm_options[mbigm_options.index(f"MIPGap {TOLS['rel_gap']:g}")] = "MIPGap 1e-7"
         solve_started = time.perf_counter()
         self.m_estimation_subsolves += 1
         try:
